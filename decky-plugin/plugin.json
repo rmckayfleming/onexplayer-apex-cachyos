@@ -1,0 +1,11 @@
+{
+  "name": "OneXPlayer Apex Tools",
+  "author": "srsholmes",
+  "flags": ["root"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["hardware", "handheld", "onexplayer"],
+    "description": "Temporary workaround fixes for OneXPlayer Apex on Bazzite: button fix, sleep fix, home button monitor, and fan control.",
+    "image": ""
+  }
+}

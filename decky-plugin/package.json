@@ -1,0 +1,22 @@
+{
+  "name": "onexplayer-apex-tools",
+  "version": "0.1.0",
+  "description": "Decky Loader plugin for OneXPlayer Apex fixes and fan control",
+  "type": "module",
+  "scripts": {
+    "build": "rollup -c",
+    "watch": "rollup -c --watch",
+    "package": "rollup -c && rm -rf 'OneXPlayer Apex Tools' && mkdir -p 'OneXPlayer Apex Tools/dist' 'OneXPlayer Apex Tools/py_modules' && cp package.json plugin.json main.py 'OneXPlayer Apex Tools/' && cp dist/index.js 'OneXPlayer Apex Tools/dist/' && cp py_modules/*.py 'OneXPlayer Apex Tools/py_modules/' && rm -f OneXPlayer_Apex_Tools.zip && zip -r OneXPlayer_Apex_Tools.zip 'OneXPlayer Apex Tools' && rm -rf 'OneXPlayer Apex Tools'"
+  },
+  "devDependencies": {
+    "@decky/ui": "^4.0.0",
+    "@decky/api": "^1.0.0",
+    "@decky/rollup": "^1.0.0",
+    "rollup": "^4.9.0",
+    "typescript": "^5.7.0",
+    "tslib": "^2.6.0"
+  },
+  "peerDependencies": {
+    "react": "18.x"
+  }
+}

@@ -1,0 +1,537 @@
+#!/usr/bin/env python3
+"""oxp-fan-ctl: OneXPlayer Apex fan control CLI
+
+Controls fan speed via the oxpec hwmon sysfs interface, with fallbacks
+to direct EC register access (ec_sys) or raw port I/O (/dev/port).
+
+Usage:
+    sudo oxp-fan-ctl status              # Show current fan status
+    sudo oxp-fan-ctl set 60              # Set fan to 60%
+    sudo oxp-fan-ctl auto                # Return to automatic control
+    sudo oxp-fan-ctl max                 # Full blast
+    sudo oxp-fan-ctl curve               # Run fan curve daemon
+    sudo oxp-fan-ctl curve --config f.json  # Custom curve from JSON
+"""
+
+import os
+import sys
+import time
+import json
+import glob
+import argparse
+import signal
+import struct
+
+HWMON_BASE = "/sys/class/hwmon"
+DRIVER_NAMES = ["oxpec", "oxp_ec", "oxp-sensors"]
+
+# EC fallback paths
+EC_IO = "/sys/kernel/debug/ec/ec0/io"
+
+# EC register addresses (Apex-specific — differs from older OneXFly models)
+EC_PWM_ENABLE = 0x4A  # 0x00 = auto, 0x01 = manual
+EC_PWM_VALUE = 0x4B   # 0-184 duty cycle
+EC_FAN_RPM = 0x78     # 2 bytes little-endian, actual RPM
+
+# EC I/O ports (for /dev/port access)
+EC_DATA_PORT = 0x62
+EC_CMD_PORT = 0x66
+
+# EC commands
+EC_CMD_READ = 0x80
+EC_CMD_WRITE = 0x81
+
+# PWM constants
+PWM_MAX = 255          # sysfs standard range
+NATIVE_PWM_MAX = 184   # OneXFly EC native range (direct EC only)
+
+DEV_PORT = "/dev/port"
+
+DEFAULT_CURVE = [
+    # (temp_celsius, fan_percent)
+    (40, 0),
+    (50, 20),
+    (60, 40),
+    (70, 60),
+    (80, 80),
+    (90, 100),
+]
+
+
+def find_hwmon():
+    """Find the oxpec hwmon device path."""
+    for hwmon in sorted(glob.glob(f"{HWMON_BASE}/hwmon*")):
+        name_file = os.path.join(hwmon, "name")
+        if os.path.exists(name_file):
+            with open(name_file) as f:
+                name = f.read().strip()
+            if name in DRIVER_NAMES:
+                return hwmon
+    return None
+
+
+def find_temp_sensor():
+    """Find the best CPU/APU temperature sensor."""
+    # Prefer k10temp / zenpower (AMD CPU temp drivers)
+    for hwmon in sorted(glob.glob(f"{HWMON_BASE}/hwmon*")):
+        name_file = os.path.join(hwmon, "name")
+        if os.path.exists(name_file):
+            with open(name_file) as f:
+                name = f.read().strip()
+            if name in ["k10temp", "zenpower"]:
+                temp_file = os.path.join(hwmon, "temp1_input")
+                if os.path.exists(temp_file):
+                    return temp_file
+    # Fallback: first temp sensor found
+    for hwmon in sorted(glob.glob(f"{HWMON_BASE}/hwmon*")):
+        for temp in sorted(glob.glob(os.path.join(hwmon, "temp*_input"))):
+            return temp
+    return None
+
+
+class HwmonFanController:
+    """Fan control via the oxpec hwmon sysfs interface."""
+
+    def __init__(self, hwmon_path):
+        self.hwmon_path = hwmon_path
+        self.pwm_path = os.path.join(hwmon_path, "pwm1")
+        self.pwm_enable_path = os.path.join(hwmon_path, "pwm1_enable")
+        self.fan_input_path = os.path.join(hwmon_path, "fan1_input")
+
+    def get_rpm(self):
+        with open(self.fan_input_path) as f:
+            return int(f.read().strip())
+
+    def get_pwm(self):
+        with open(self.pwm_path) as f:
+            return int(f.read().strip())
+
+    def get_percent(self):
+        return self.get_pwm() / PWM_MAX * 100
+
+    def get_mode(self):
+        with open(self.pwm_enable_path) as f:
+            val = int(f.read().strip())
+        # hwmon ABI: 0=full speed, 1=manual, 2=auto
+        return {0: "full", 1: "manual", 2: "auto"}.get(val, f"unknown({val})")
+
+    def set_auto(self):
+        with open(self.pwm_enable_path, "w") as f:
+            f.write("2")
+
+    def set_manual(self, percent):
+        """Set manual fan speed as a percentage (0-100)."""
+        pwm_value = int(percent / 100 * PWM_MAX)
+        pwm_value = max(0, min(PWM_MAX, pwm_value))
+        with open(self.pwm_enable_path, "w") as f:
+            f.write("1")
+        with open(self.pwm_path, "w") as f:
+            f.write(str(pwm_value))
+
+    def status_str(self):
+        mode = self.get_mode()
+        rpm = self.get_rpm()
+        pwm = self.get_pwm()
+        pct = pwm / PWM_MAX * 100
+        return (
+            f"Backend: hwmon ({self.hwmon_path})\n"
+            f"Mode:    {mode}\n"
+            f"RPM:     {rpm}\n"
+            f"PWM:     {pwm}/{PWM_MAX} ({pct:.0f}%)"
+        )
+
+
+class ECFanController:
+    """Fan control via direct EC register access (ec_sys module)."""
+
+    def __init__(self):
+        if not os.path.exists(EC_IO):
+            os.system("modprobe ec_sys write_support=1 2>/dev/null")
+        if not os.path.exists(EC_IO):
+            raise RuntimeError(
+                "Cannot access EC: ec_sys module not available.\n"
+                "Try: sudo modprobe ec_sys write_support=1"
+            )
+
+    def _read_byte(self, offset):
+        with open(EC_IO, "rb") as f:
+            f.seek(offset)
+            return f.read(1)[0]
+
+    def _write_byte(self, offset, value):
+        with open(EC_IO, "r+b") as f:
+            f.seek(offset)
+            f.write(bytes([value]))
+
+    def _read_word(self, offset):
+        with open(EC_IO, "rb") as f:
+            f.seek(offset)
+            data = f.read(2)
+        return int.from_bytes(data, "little")
+
+    def get_rpm(self):
+        return self._read_word(EC_FAN_RPM)
+
+    def get_pwm(self):
+        return self._read_byte(EC_PWM_VALUE)
+
+    def get_percent(self):
+        return self.get_pwm() / NATIVE_PWM_MAX * 100
+
+    def get_mode(self):
+        val = self._read_byte(EC_PWM_ENABLE)
+        return "manual" if val == 0x01 else "auto"
+
+    def set_auto(self):
+        self._write_byte(EC_PWM_ENABLE, 0x00)
+
+    def set_manual(self, percent):
+        """Set fan speed as percentage (0-100)."""
+        native_val = int(percent / 100 * NATIVE_PWM_MAX)
+        native_val = max(0, min(NATIVE_PWM_MAX, native_val))
+        self._write_byte(EC_PWM_ENABLE, 0x01)
+        self._write_byte(EC_PWM_VALUE, native_val)
+
+    def status_str(self):
+        mode = self.get_mode()
+        rpm = self.get_rpm()
+        raw = self.get_pwm()
+        pct = raw / NATIVE_PWM_MAX * 100
+        return (
+            f"Backend: direct EC ({EC_IO})\n"
+            f"Mode:    {mode}\n"
+            f"RPM:     {rpm}\n"
+            f"PWM:     {raw}/{NATIVE_PWM_MAX} ({pct:.0f}%)"
+        )
+
+
+class PortIOFanController:
+    """Fan control via direct I/O port access (/dev/port).
+
+    Talks to the ACPI Embedded Controller using the standard EC command
+    protocol on ports 0x62 (data) and 0x66 (command/status).
+    This works even when ec_sys and oxpec are unavailable.
+    """
+
+    def __init__(self):
+        if not os.path.exists(DEV_PORT):
+            raise RuntimeError(f"{DEV_PORT} not found")
+        # Test that we can open it
+        try:
+            with open(DEV_PORT, "rb") as f:
+                f.seek(EC_CMD_PORT)
+                f.read(1)
+        except PermissionError:
+            raise RuntimeError(
+                f"Cannot read {DEV_PORT}: permission denied (need root)")
+
+    def _inb(self, port):
+        """Read one byte from an I/O port."""
+        with open(DEV_PORT, "rb") as f:
+            f.seek(port)
+            return f.read(1)[0]
+
+    def _outb(self, port, value):
+        """Write one byte to an I/O port."""
+        with open(DEV_PORT, "r+b") as f:
+            f.seek(port)
+            f.write(bytes([value]))
+
+    def _wait_ec_ibf_clear(self, timeout=0.5):
+        """Wait for EC input buffer to be empty (IBF=0 in status register)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = self._inb(EC_CMD_PORT)
+            if not (status & 0x02):  # IBF bit
+                return
+            time.sleep(0.001)
+        raise TimeoutError("EC input buffer not ready")
+
+    def _wait_ec_obf_set(self, timeout=0.5):
+        """Wait for EC output buffer to have data (OBF=1 in status register)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = self._inb(EC_CMD_PORT)
+            if status & 0x01:  # OBF bit
+                return
+            time.sleep(0.001)
+        raise TimeoutError("EC output buffer not ready")
+
+    def _drain_obf(self):
+        """Drain any stale data from the EC output buffer."""
+        for _ in range(16):
+            status = self._inb(EC_CMD_PORT)
+            if not (status & 0x01):
+                return
+            self._inb(EC_DATA_PORT)  # discard stale byte
+            time.sleep(0.001)
+
+    def _ec_read(self, reg, retries=3):
+        """Read a byte from an EC register."""
+        for attempt in range(retries):
+            try:
+                self._drain_obf()
+                self._wait_ec_ibf_clear()
+                self._outb(EC_CMD_PORT, EC_CMD_READ)
+                self._wait_ec_ibf_clear()
+                self._outb(EC_DATA_PORT, reg)
+                self._wait_ec_obf_set()
+                val = self._inb(EC_DATA_PORT)
+                time.sleep(0.01)  # give EC time to settle
+                return val
+            except TimeoutError:
+                if attempt < retries - 1:
+                    time.sleep(0.05)
+                    self._drain_obf()
+                else:
+                    raise
+
+    def _ec_write(self, reg, value, retries=3):
+        """Write a byte to an EC register."""
+        for attempt in range(retries):
+            try:
+                self._drain_obf()
+                self._wait_ec_ibf_clear()
+                self._outb(EC_CMD_PORT, EC_CMD_WRITE)
+                self._wait_ec_ibf_clear()
+                self._outb(EC_DATA_PORT, reg)
+                self._wait_ec_ibf_clear()
+                self._outb(EC_DATA_PORT, value)
+                time.sleep(0.01)  # give EC time to settle
+                return
+            except TimeoutError:
+                if attempt < retries - 1:
+                    time.sleep(0.05)
+                    self._drain_obf()
+                else:
+                    raise
+
+    def get_rpm(self):
+        """Read fan RPM, retrying to work around kernel EC driver races."""
+        readings = []
+        for _ in range(5):
+            try:
+                lo = self._ec_read(EC_FAN_RPM)
+                hi = self._ec_read(EC_FAN_RPM + 1)
+                rpm = (hi << 8) | lo
+                if rpm < 10000:  # filter out obviously corrupt reads
+                    readings.append(rpm)
+            except TimeoutError:
+                pass
+            time.sleep(0.05)
+        if not readings:
+            return -1  # could not get a valid reading
+        # Return the median to reject outliers
+        readings.sort()
+        return readings[len(readings) // 2]
+
+    def get_pwm(self):
+        return self._ec_read(EC_PWM_VALUE)
+
+    def get_percent(self):
+        return self.get_pwm() / NATIVE_PWM_MAX * 100
+
+    def get_mode(self):
+        val = self._ec_read(EC_PWM_ENABLE)
+        return "manual" if val == 0x01 else "auto"
+
+    def set_auto(self):
+        self._ec_write(EC_PWM_ENABLE, 0x00)
+
+    def set_manual(self, percent):
+        """Set fan speed as percentage (0-100)."""
+        native_val = int(percent / 100 * NATIVE_PWM_MAX)
+        native_val = max(0, min(NATIVE_PWM_MAX, native_val))
+        self._ec_write(EC_PWM_ENABLE, 0x01)
+        self._ec_write(EC_PWM_VALUE, native_val)
+
+    def status_str(self):
+        mode = self.get_mode()
+        rpm = self.get_rpm()
+        raw = self.get_pwm()
+        pct = raw / NATIVE_PWM_MAX * 100
+        rpm_str = str(rpm) if rpm >= 0 else "N/A (read error)"
+        return (
+            f"Backend: port I/O ({DEV_PORT})\n"
+            f"Mode:    {mode}\n"
+            f"RPM:     {rpm_str}\n"
+            f"PWM:     {raw}/{NATIVE_PWM_MAX} ({pct:.0f}%)"
+        )
+
+
+class FanCurveController:
+    """Runs a fan curve loop, adjusting speed based on temperature."""
+
+    def __init__(self, fan_ctrl, temp_sensor_path, curve=None,
+                 interval=2.0, hysteresis=2):
+        self.fan = fan_ctrl
+        self.temp_path = temp_sensor_path
+        self.curve = curve or DEFAULT_CURVE
+        self.interval = interval
+        self.hysteresis = hysteresis
+        self._running = False
+
+    def get_temp(self):
+        with open(self.temp_path) as f:
+            return int(f.read().strip()) / 1000  # millidegrees → celsius
+
+    def interpolate(self, temp):
+        """Linear interpolation on the fan curve."""
+        if temp <= self.curve[0][0]:
+            return self.curve[0][1]
+        if temp >= self.curve[-1][0]:
+            return self.curve[-1][1]
+        for i in range(len(self.curve) - 1):
+            t0, s0 = self.curve[i]
+            t1, s1 = self.curve[i + 1]
+            if t0 <= temp <= t1:
+                ratio = (temp - t0) / (t1 - t0)
+                return s0 + ratio * (s1 - s0)
+        return self.curve[-1][1]
+
+    def run(self):
+        """Main fan curve loop. Blocks until interrupted."""
+        self._running = True
+        last_speed = -1
+
+        def handle_stop(sig, frame):
+            self._running = False
+
+        signal.signal(signal.SIGTERM, handle_stop)
+
+        print(f"Fan curve active (polling every {self.interval}s). Ctrl+C to stop.")
+        print(f"Temp sensor: {self.temp_path}")
+        print(f"Curve: {self.curve}")
+        print()
+
+        try:
+            while self._running:
+                temp = self.get_temp()
+                target = self.interpolate(temp)
+                # Only change if delta exceeds hysteresis
+                if abs(target - last_speed) > self.hysteresis or last_speed < 0:
+                    self.fan.set_manual(target)
+                    last_speed = target
+                    print(f"  {temp:.1f}°C → {target:.0f}%")
+                time.sleep(self.interval)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            print("\nRestoring automatic fan control...")
+            self.fan.set_auto()
+            print("Done.")
+
+
+def get_controller():
+    """Auto-detect and return the best available fan controller."""
+    # 1. Try hwmon sysfs (best — proper kernel driver)
+    hwmon = find_hwmon()
+    if hwmon:
+        ctrl = HwmonFanController(hwmon)
+        print(f"Using hwmon driver at {hwmon}")
+        return ctrl
+
+    # 2. Try ec_sys debugfs
+    try:
+        ctrl = ECFanController()
+        print("Using direct EC access via ec_sys")
+        return ctrl
+    except RuntimeError:
+        pass
+
+    # 3. Try /dev/port (raw I/O port access)
+    try:
+        ctrl = PortIOFanController()
+        print("Using direct port I/O (/dev/port)")
+        return ctrl
+    except RuntimeError:
+        pass
+
+    print(
+        "ERROR: No fan control backend available.\n"
+        "Tried: hwmon (oxpec), ec_sys, /dev/port\n\n"
+        "Options:\n"
+        "  1. modprobe oxpec (if kernel has Apex support)\n"
+        "  2. modprobe ec_sys write_support=1\n"
+        "  3. Ensure /dev/port exists and you're running as root\n",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="OneXPlayer Apex fan control CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  sudo oxp-fan-ctl status\n"
+            "  sudo oxp-fan-ctl set 60\n"
+            "  sudo oxp-fan-ctl auto\n"
+            "  sudo oxp-fan-ctl max\n"
+            "  sudo oxp-fan-ctl curve\n"
+            "  sudo oxp-fan-ctl curve --config my_curve.json\n"
+        ),
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    sub.add_parser("status", help="Show current fan status")
+    set_cmd = sub.add_parser("set", help="Set fan speed (0-100%%)")
+    set_cmd.add_argument("percent", type=int, choices=range(0, 101),
+                         metavar="0-100")
+    sub.add_parser("auto", help="Return to automatic fan control")
+    sub.add_parser("max", help="Set fans to maximum speed")
+    curve_cmd = sub.add_parser("curve", help="Run fan curve controller")
+    curve_cmd.add_argument(
+        "--config", help="JSON fan curve file: [[temp, pct], ...]")
+    curve_cmd.add_argument(
+        "--interval", type=float, default=2.0,
+        help="Polling interval in seconds (default: 2)")
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+
+    if os.geteuid() != 0:
+        print("ERROR: This tool requires root. Run with sudo.", file=sys.stderr)
+        sys.exit(1)
+
+    fan = get_controller()
+
+    if args.command == "status":
+        print(fan.status_str())
+        temp_sensor = find_temp_sensor()
+        if temp_sensor:
+            with open(temp_sensor) as f:
+                temp = int(f.read().strip()) / 1000
+            print(f"Temp:    {temp:.1f}°C ({temp_sensor})")
+
+    elif args.command == "set":
+        fan.set_manual(args.percent)
+        print(f"Fan set to {args.percent}%")
+
+    elif args.command == "auto":
+        fan.set_auto()
+        print("Fan control returned to automatic")
+
+    elif args.command == "max":
+        fan.set_manual(100)
+        print("Fans set to maximum")
+
+    elif args.command == "curve":
+        temp_sensor = find_temp_sensor()
+        if not temp_sensor:
+            print("ERROR: No temperature sensor found", file=sys.stderr)
+            sys.exit(1)
+        curve = DEFAULT_CURVE
+        if args.config:
+            with open(args.config) as f:
+                curve = [tuple(p) for p in json.load(f)]
+        ctrl = FanCurveController(fan, temp_sensor, curve,
+                                  interval=args.interval)
+        ctrl.run()
+
+
+if __name__ == "__main__":
+    main()
