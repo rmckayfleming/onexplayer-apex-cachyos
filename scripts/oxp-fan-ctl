@@ -363,12 +363,12 @@ class FanCurveController:
     """Runs a fan curve loop, adjusting speed based on temperature."""
 
     def __init__(self, fan_ctrl, temp_sensor_path, curve=None,
-                 interval=2.0, hysteresis=2):
+                 interval=2.0, hysteresis=3):
         self.fan = fan_ctrl
         self.temp_path = temp_sensor_path
         self.curve = curve or DEFAULT_CURVE
         self.interval = interval
-        self.hysteresis = hysteresis
+        self.hysteresis = hysteresis  # minimum speed change (%) to apply
         self._running = False
 
     def get_temp(self):

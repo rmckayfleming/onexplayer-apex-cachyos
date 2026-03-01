@@ -1,0 +1,54 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        working-directory: decky-plugin
+        run: bun install
+
+      - name: Build plugin
+        working-directory: decky-plugin
+        run: bun run build
+
+      - name: Package plugin
+        working-directory: decky-plugin
+        run: |
+          mkdir -p "OneXPlayer Apex Tools/dist" "OneXPlayer Apex Tools/py_modules" "OneXPlayer Apex Tools/logs"
+          cp package.json plugin.json main.py "OneXPlayer Apex Tools/"
+          cp dist/index.js "OneXPlayer Apex Tools/dist/"
+          cp py_modules/*.py "OneXPlayer Apex Tools/py_modules/"
+          zip -r OneXPlayer_Apex_Tools.zip "OneXPlayer Apex Tools"
+
+      - name: Get short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ steps.sha.outputs.short }}
+          name: Build ${{ steps.sha.outputs.short }}
+          body: |
+            Automated build from commit ${{ github.sha }}.
+
+            ## Installation
+            1. Download `OneXPlayer_Apex_Tools.zip`
+            2. Extract to `~/homebrew/plugins/`
+            3. Restart Decky: `sudo systemctl restart plugin_loader.service`
+          files: decky-plugin/OneXPlayer_Apex_Tools.zip
+          make_latest: true

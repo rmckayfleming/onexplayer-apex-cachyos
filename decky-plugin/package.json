@@ -6,15 +6,24 @@
   "scripts": {
     "build": "rollup -c",
     "watch": "rollup -c --watch",
-    "package": "rollup -c && rm -rf 'OneXPlayer Apex Tools' && mkdir -p 'OneXPlayer Apex Tools/dist' 'OneXPlayer Apex Tools/py_modules' && cp package.json plugin.json main.py 'OneXPlayer Apex Tools/' && cp dist/index.js 'OneXPlayer Apex Tools/dist/' && cp py_modules/*.py 'OneXPlayer Apex Tools/py_modules/' && rm -f OneXPlayer_Apex_Tools.zip && zip -r OneXPlayer_Apex_Tools.zip 'OneXPlayer Apex Tools' && rm -rf 'OneXPlayer Apex Tools'"
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write 'src/**/*.{ts,tsx}'",
+    "format:check": "prettier --check 'src/**/*.{ts,tsx}'",
+    "package": "rollup -c && rm -rf 'OneXPlayer Apex Tools' && mkdir -p 'OneXPlayer Apex Tools/dist' 'OneXPlayer Apex Tools/py_modules' && cp package.json plugin.json main.py 'OneXPlayer Apex Tools/' && cp dist/index.js 'OneXPlayer Apex Tools/dist/' && cp py_modules/*.py 'OneXPlayer Apex Tools/py_modules/' && rm -f OneXPlayer_Apex_Tools.zip && zip -r OneXPlayer_Apex_Tools.zip 'OneXPlayer Apex Tools' && rm -rf 'OneXPlayer Apex Tools'",
+    "deploy": "bun run package && cp OneXPlayer_Apex_Tools.zip ~/Downloads/ && echo 'Copied OneXPlayer_Apex_Tools.zip to ~/Downloads/'",
+    "install-plugin": "bun run package && sudo unzip -o OneXPlayer_Apex_Tools.zip -d ~/homebrew/plugins/ && sudo systemctl restart plugin_loader && echo 'Plugin installed and loader restarted'"
+  },
+  "dependencies": {
+    "@decky/api": "^1.1.3",
+    "tslib": "^2.6.0"
   },
   "devDependencies": {
-    "@decky/ui": "^4.0.0",
-    "@decky/api": "^1.0.0",
-    "@decky/rollup": "^1.0.0",
+    "@decky/rollup": "^1.0.2",
+    "@decky/ui": "^4.11.0",
+    "@types/react": "^19.2.14",
+    "prettier": "^3.8.1",
     "rollup": "^4.9.0",
-    "typescript": "^5.7.0",
-    "tslib": "^2.6.0"
+    "typescript": "^5.7.0"
   },
   "peerDependencies": {
     "react": "18.x"

@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+builds/*
+!builds/.gitkeep
+dist/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Decky plugin backups
+decky-plugin/backups/
+
+# Lock files
+bun.lock
+package-lock.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
