@@ -25,7 +25,7 @@ interface FanStatus {
 }
 
 interface StatusResponse {
-  button_fix: { applied: boolean; error?: string; home_monitor_running?: boolean; back_paddle_running?: boolean };
+  button_fix: { applied: boolean; error?: string; home_monitor_running?: boolean };
   sleep_fix: { applied: boolean; karg: string; karg_set: boolean };
   fan: FanStatus;
 }
@@ -152,7 +152,7 @@ const InlineStatus: FC<{ loading: LoadingState; result: ResultMessage | null; se
 };
 
 const Content: FC = () => {
-  const [buttonFix, setButtonFix] = useState<{ applied: boolean; error?: string; home_monitor_running?: boolean; back_paddle_running?: boolean }>({
+  const [buttonFix, setButtonFix] = useState<{ applied: boolean; error?: string; home_monitor_running?: boolean }>({
     applied: false,
   });
   const [sleepFix, setSleepFix] = useState<{
@@ -339,7 +339,7 @@ const Content: FC = () => {
             label="Button Fix"
             description={
               buttonFix.applied
-                ? `Applied${buttonFix.home_monitor_running ? " · Home active" : ""}${buttonFix.back_paddle_running ? " · Paddles active" : ""} (toggle off to revert)`
+                ? `Applied${buttonFix.home_monitor_running ? " · Home active" : ""} (toggle off to revert)`
                 : buttonFix.error
                   ? `Error: ${buttonFix.error}`
                   : "Not applied"
@@ -350,7 +350,7 @@ const Content: FC = () => {
           />
         </PanelSectionRow>
         <InlineStatus loading={loading} result={result} section="button" />
-        {buttonFix.applied && buttonFix.back_paddle_running && (
+        {buttonFix.applied && (
           <PanelSectionRow>
             <div
               style={{
@@ -363,8 +363,8 @@ const Content: FC = () => {
                 color: "#88bbdd",
               }}
             >
-              Back paddles (L4/R4) are active as remappable buttons. Configure them in Steam Input
-              controller settings (per-game or global).
+              Back paddles (L4/R4) are mapped as extra buttons via HHD. Configure them in Steam
+              Input controller settings (per-game or global).
             </div>
           </PanelSectionRow>
         )}

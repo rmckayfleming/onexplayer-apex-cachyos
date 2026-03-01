@@ -598,11 +598,14 @@ def _patch_base(base_file):
 
 
 def _patch_hid_v2(hid_v2_file):
-    """Patch hid_v2.py to add Apex back paddle byte values to OXP_BUTTONS.
+    """Patch hid_v2.py to enable back paddle intercept and button mappings.
 
-    The Apex back paddles appear as gamepad B/Y because their HID byte values
-    aren't in OXP_BUTTONS. We add entries so HHD maps them to extra_l1/extra_r1
-    (L4/R4) instead.
+    Two changes:
+    1. Add gen_intercept(True) to INITIALIZE so HHD sends the intercept command
+       on device open — this makes the firmware send separate L4/R4 events
+       instead of mirroring B/Y on the Xbox gamepad.
+    2. Ensure OXP_BUTTONS has 0x22/0x23 mapped to extra_l1/extra_r1
+       (already present upstream, but add marker comment for detection).
     """
     with open(hid_v2_file) as f:
         content = f.read()
@@ -610,47 +613,61 @@ def _patch_hid_v2(hid_v2_file):
     if "# Apex back paddles" in content:
         return  # Already patched
 
-    # Find the OXP_BUTTONS dict and add Apex entries
-    # The dict looks like:
-    #   OXP_BUTTONS = {
-    #       0x24: KBD_NAME,
-    #       0x21: HOME_NAME,
-    #       0x22: "extra_l1",
-    #       0x23: "extra_r1",
-    #   }
-    # We insert Apex-specific entries before the closing brace.
-    apex_entries = (
-        f'    # Apex back paddles\n'
-        f'    {hex(APEX_L4_BYTE)}: "extra_l1",\n'
-        f'    {hex(APEX_R4_BYTE)}: "extra_r1",\n'
-    )
+    patched = False
 
-    # Strategy: find the last entry in OXP_BUTTONS and append after it
+    # 1. Enable intercept in INITIALIZE
+    # The file has `gen_intercept(False)` commented out — replace with enabled version.
+    if "gen_intercept(True)" not in content:
+        # Replace the commented-out gen_intercept line with an active one
+        if "# gen_intercept(False)," in content:
+            content = content.replace(
+                "# gen_intercept(False),",
+                "gen_intercept(True),  # Apex: enable separate L4/R4 back paddle events",
+            )
+            _log_info("Enabled gen_intercept(True) in INITIALIZE")
+            patched = True
+        elif "INITIALIZE = [" in content and "gen_intercept" not in content:
+            # No gen_intercept at all — add it to the INITIALIZE list
+            content = content.replace(
+                "INITIALIZE = [",
+                "INITIALIZE = [\n    gen_intercept(True),  # Apex: enable separate L4/R4 back paddle events",
+            )
+            _log_info("Added gen_intercept(True) to INITIALIZE")
+            patched = True
+
+    # 2. Add marker comment to OXP_BUTTONS for is_applied() detection
     oxp_buttons_pattern = r'(OXP_BUTTONS\s*=\s*\{[^}]*)(})'
     match = re.search(oxp_buttons_pattern, content, re.DOTALL)
-    if not match:
-        raise RuntimeError("Could not find OXP_BUTTONS dict in hid_v2.py")
+    if match:
+        existing_block = match.group(1)
+        l4_hex = hex(APEX_L4_BYTE)
+        r4_hex = hex(APEX_R4_BYTE)
+        if l4_hex in existing_block and r4_hex in existing_block:
+            # Byte values already present — just add marker comment
+            content = content.replace(
+                match.group(0),
+                match.group(1) + "    # Apex back paddles\n" + match.group(2),
+            )
+            patched = True
+        else:
+            # Add the byte entries
+            apex_entries = (
+                f'    # Apex back paddles\n'
+                f'    {l4_hex}: "extra_l1",\n'
+                f'    {r4_hex}: "extra_r1",\n'
+            )
+            content = content.replace(
+                match.group(0),
+                match.group(1) + apex_entries + match.group(2),
+            )
+            patched = True
 
-    # Check if our byte values are already present (avoid duplicates)
-    existing_block = match.group(1)
-    l4_hex = hex(APEX_L4_BYTE)
-    r4_hex = hex(APEX_R4_BYTE)
-    if l4_hex in existing_block and r4_hex in existing_block:
-        _log_info("OXP_BUTTONS already contains Apex byte values — adding marker only")
-        # Add a comment marker so is_applied() detects it
-        content = content.replace(
-            match.group(0),
-            match.group(1) + "    # Apex back paddles\n" + match.group(2),
-        )
-    else:
-        content = content.replace(
-            match.group(0),
-            match.group(1) + apex_entries + match.group(2),
-        )
+    if not patched:
+        raise RuntimeError("Could not patch hid_v2.py — file structure unexpected")
 
     with open(hid_v2_file, 'w') as f:
         f.write(content)
-    _log_info("hid_v2.py patched — added Apex back paddle byte mappings")
+    _log_info("hid_v2.py patched — enabled intercept + back paddle mappings")
 
 
 if __name__ == "__main__":
