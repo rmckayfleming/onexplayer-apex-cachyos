@@ -26,7 +26,7 @@ interface FanStatus {
 
 interface StatusResponse {
   button_fix: { applied: boolean; error?: string; home_monitor_running?: boolean; hid_v2_patched?: boolean };
-  sleep_fix: { applied: boolean; all_kargs_set: boolean; udev_rule: boolean };
+  sleep_fix: { applied: boolean; karg: string; karg_set: boolean };
   fan: FanStatus;
 }
 
@@ -157,12 +157,10 @@ const Content: FC = () => {
   });
   const [sleepFix, setSleepFix] = useState<{
     applied: boolean;
-    all_kargs_set: boolean;
-    udev_rule: boolean;
+    karg_set: boolean;
   }>({
     applied: false,
-    all_kargs_set: false,
-    udev_rule: false,
+    karg_set: false,
   });
   const [sleepReboot, setSleepReboot] = useState(false);
   const [fan, setFan] = useState<FanStatus>({ available: false });
@@ -256,16 +254,16 @@ const Content: FC = () => {
 
   const handleSleepFix = async (enabled: boolean) => {
     if (!enabled) return;
-    setLoading({ active: "sleep", message: "Applying sleep fix..." });
+    setLoading({ active: "sleep", message: "Applying sleep fix (rpm-ostree)..." });
     try {
       const res = await applySleepFix();
       if (res.success) {
-        setSleepFix({ applied: true, all_kargs_set: true, udev_rule: true });
         if (res.reboot_needed) {
           setSleepReboot(true);
-          showResult("sleep", "Applied — reboot required", "success");
+          showResult("sleep", "Applied — reboot to activate", "success");
         } else {
-          showResult("sleep", "Applied", "success");
+          setSleepFix({ applied: true, karg_set: true });
+          showResult("sleep", "Already active", "success");
         }
       } else {
         showResult("sleep", res.error || "Failed", "error");
@@ -355,24 +353,40 @@ const Content: FC = () => {
         </PanelSectionRow>
         <InlineStatus loading={loading} result={result} section="button" />
 
-        {/* Sleep Fix — hidden for now, will reinstate later
         <PanelSectionRow>
           <ToggleField
             label="Sleep Fix"
             description={
               sleepFix.applied
                 ? sleepReboot
-                  ? "Applied — Reboot required"
-                  : "Applied"
-                : "Not applied"
+                  ? "Applied — Reboot required for changes to take effect"
+                  : "Active (amd_iommu=off)"
+                : "Not applied — adds amd_iommu=off kernel param"
             }
-            checked={sleepFix.applied}
-            disabled={sleepFix.applied || loading.active === "sleep"}
+            checked={sleepFix.applied || sleepReboot}
+            disabled={sleepFix.applied || sleepReboot || loading.active === "sleep"}
             onChange={handleSleepFix}
           />
         </PanelSectionRow>
         <InlineStatus loading={loading} result={result} section="sleep" />
-        */}
+        {sleepReboot && (
+          <PanelSectionRow>
+            <div
+              style={{
+                backgroundColor: "#4a3000",
+                border: "1px solid #7a5000",
+                borderRadius: "4px",
+                padding: "8px 12px",
+                fontSize: "11px",
+                lineHeight: "1.4",
+                color: "#ffcc00",
+              }}
+            >
+              Reboot required to activate sleep fix. Note: button fix patches will need to be
+              re-applied after reboot (rpm-ostree creates a new deployment).
+            </div>
+          </PanelSectionRow>
+        )}
 
       </PanelSection>
 

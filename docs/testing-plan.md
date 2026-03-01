@@ -1,19 +1,17 @@
 # Testing Plan
 
-## 1. Sleep Fix v2
+## 1. Sleep Fix
 
-The old sleep fix (4 kargs + udev rule) is being replaced with a single `amd_iommu=off` karg, reported to fix wake-from-sleep.
+Adds `amd_iommu=off` kernel parameter to fix wake-from-sleep. Also cleans up any old sleep fix kargs if present.
 
 ```bash
-# SSH into the Apex, then:
-sudo bash scripts/fix-sleep-v2.sh
+sudo bash scripts/fix-sleep.sh
 # Reboot when prompted
 systemctl reboot
 
 # After reboot, verify:
 cat /proc/cmdline
 # Should contain: amd_iommu=off
-# Should NOT contain: amdgpu.cwsr_enable=0, iommu=pt, amdgpu.gttsize=126976, ttm.pages_limit=32505856
 
 # Test suspend:
 sudo systemctl suspend
@@ -22,6 +20,8 @@ sudo systemctl suspend
 # Check logs after wake:
 journalctl -b | grep -i 'suspend\|resume\|iommu\|error\|fail' | tail -30
 ```
+
+**Note:** This creates a new ostree deployment. Any button fix patches (from `ostree admin unlock --hotfix`) will be lost. Re-apply the button fix after rebooting.
 
 ## 2. Controller-after-sleep bug
 

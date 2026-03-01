@@ -265,48 +265,30 @@ The AMD Strix Halo platform has **multiple overlapping suspend/resume bugs** in 
 | Fans/RGB stay on during sleep | Common on OXP | Device appears asleep but hardware still running | EC not notified of suspend state | Bazzite modern standby patches (Jan 2025+) |
 | Spurious wake | Common | Device wakes immediately after suspend | Fingerprint sensor / touchscreen triggering wake | Disable wake sources (see below) |
 
-### 3b. Apply Kernel Parameters
+### 3b. Apply Kernel Parameter
 
-These are the recommended parameters for Strix Halo stability. Apply them all:
+A single kernel parameter fixes wake-from-sleep on the Apex:
 
 ```bash
-# Disable CWSR (fixes MES firmware hang on resume)
-rpm-ostree kargs --append-if-missing="amdgpu.cwsr_enable=0"
-
-# Use passthrough IOMMU (reduces overhead, improves stability)
-rpm-ostree kargs --append-if-missing="iommu=pt"
-
-# Increase GTT size for large VRAM configs (Apex can allocate up to 96GB)
-rpm-ostree kargs --append-if-missing="amdgpu.gttsize=126976"
-
-# Increase TTM page limit
-rpm-ostree kargs --append-if-missing="ttm.pages_limit=32505856"
+rpm-ostree kargs --append-if-missing="amd_iommu=off"
 ```
 
 Reboot after applying. Verify with:
 
 ```bash
 cat /proc/cmdline
-# Should contain all four parameters
+# Should contain: amd_iommu=off
 ```
 
-### 3c. Disable Spurious Wake Sources
+Or use the standalone script which also cleans up any old sleep fix kargs:
 
 ```bash
-# Find wake-capable devices
-grep . /sys/bus/*/devices/*/power/wakeup 2>/dev/null | grep enabled
-
-# Disable common culprits (fingerprint sensor, touchscreen)
-echo disabled | sudo tee /sys/bus/i2c/devices/i2c-PNP0C50:00/power/wakeup 2>/dev/null
-
-# Make persistent via udev rule:
-sudo tee /etc/udev/rules.d/99-disable-spurious-wake.rules << 'EOF'
-# Disable fingerprint sensor wake
-ACTION=="add", SUBSYSTEM=="i2c", ATTR{name}=="PNP0C50:00", ATTR{power/wakeup}="disabled"
-EOF
+sudo bash scripts/fix-sleep.sh
 ```
 
-### 3d. Test Suspend
+**Note:** `rpm-ostree kargs` creates a new ostree deployment. Any `ostree admin unlock --hotfix` overlay (e.g. button fix patches) will be lost on reboot. Re-apply the button fix after rebooting.
+
+### 3c. Test Suspend
 
 ```bash
 # Suspend
@@ -404,10 +386,7 @@ The full implementation plan is in **[`docs/onexplayer-apex-fan-control-plan.md`
 ### Kernel Parameters (Strix Halo)
 
 ```
-amdgpu.cwsr_enable=0
-iommu=pt
-amdgpu.gttsize=126976
-ttm.pages_limit=32505856
+amd_iommu=off
 ```
 
 ### EC Register Map (OneXFly Apex)
@@ -445,6 +424,7 @@ After implementing all fixes:
 - [ ] `sudo oxp-fan-ctl status` → shows RPM and mode
 - [ ] `sudo oxp-fan-ctl set 80` → fan audibly speeds up
 - [ ] Decky QAM → fan plugin appears with working controls
+- [ ] `cat /proc/cmdline` → contains `amd_iommu=off`
 - [ ] `sudo systemctl suspend` → device sleeps and wakes cleanly
 - [ ] After wake: display, audio, controller, fan control all still work
 - [ ] `journalctl -b` → no amdgpu errors after resume

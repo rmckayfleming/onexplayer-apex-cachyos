@@ -287,8 +287,8 @@ class Plugin:
             return {"success": False, "error": str(e)}
 
     # -- Sleep Fix --
-    # Applies kernel params and udev rules to fix suspend/resume issues
-    # on the Strix Halo APU.
+    # Adds amd_iommu=off kernel param via rpm-ostree to fix suspend/resume.
+    # Creates a new ostree deployment — button fix patches need re-applying after reboot.
 
     async def get_sleep_fix_status(self):
         if not sleep_fix_status:
@@ -298,7 +298,17 @@ class Plugin:
     async def apply_sleep_fix(self):
         if not apply_sleep_fix_impl:
             return {"success": False, "error": "sleep_fix module not loaded"}
-        return apply_sleep_fix_impl()
+        _log_info("Applying sleep fix (amd_iommu=off)...")
+        try:
+            result = await asyncio.to_thread(apply_sleep_fix_impl)
+            if result.get("success"):
+                _log_info(f"Sleep fix result: {result.get('message', 'OK')}")
+            else:
+                _log_error(f"Sleep fix failed: {result.get('error', 'unknown')}")
+            return result
+        except Exception as e:
+            _log_error(f"Sleep fix exception: {e}")
+            return {"success": False, "error": str(e)}
 
     # -- Home Button Monitor (private — managed by button fix lifecycle) --
 
