@@ -90,27 +90,41 @@ APEX_DEVICE_ENTRY = '''    "ONEXPLAYER APEX": {
         "apex_kbd": True,
     },'''
 
+# Placeholder byte values for Apex back paddles in hid_v2.py OXP_BUTTONS.
+# These need to be updated after capturing raw HID reports from the device:
+#   sudo systemctl stop hhd
+#   sudo cat /dev/hidrawN | xxd   (press each paddle, note the byte)
+# On other OXP devices, L4=0x22 and R4=0x23. The Apex sends different values.
+APEX_L4_BYTE = 0x22  # TODO: replace with actual Apex L4 paddle byte
+APEX_R4_BYTE = 0x23  # TODO: replace with actual Apex R4 paddle byte
+
 
 def _find_hhd_files():
-    """Locate HHD oxp const.py and base.py."""
+    """Locate HHD oxp const.py, base.py, and hid_v2.py."""
     # Try hardcoded path first (most common on Bazzite)
     const_file = "/usr/lib/python3.14/site-packages/hhd/device/oxp/const.py"
     base_file = "/usr/lib/python3.14/site-packages/hhd/device/oxp/base.py"
+    hid_v2_file = "/usr/lib/python3.14/site-packages/hhd/device/oxp/hid_v2.py"
     if os.path.exists(const_file) and os.path.exists(base_file):
-        return const_file, base_file
+        if not os.path.exists(hid_v2_file):
+            hid_v2_file = None
+        return const_file, base_file, hid_v2_file
     # Fallback: search for any Python version
     results = sorted(glob.glob("/usr/lib/python3*/site-packages/hhd/device/oxp/const.py"))
     if results:
         const_file = results[-1]
         base_file = const_file.replace("const.py", "base.py")
+        hid_v2_file = const_file.replace("const.py", "hid_v2.py")
         if os.path.exists(base_file):
-            return const_file, base_file
-    return None, None
+            if not os.path.exists(hid_v2_file):
+                hid_v2_file = None
+            return const_file, base_file, hid_v2_file
+    return None, None, None
 
 
 def is_applied():
     """Check if the Apex button fix is already applied."""
-    const_file, base_file = _find_hhd_files()
+    const_file, base_file, hid_v2_file = _find_hhd_files()
     if not const_file or not base_file:
         return {"applied": False, "error": "HHD oxp files not found"}
     try:
@@ -120,12 +134,23 @@ def is_applied():
             base_content = f.read()
         const_ok = "ONEXPLAYER APEX" in const_content and "APEX_BTN_MAPPINGS" in const_content
         base_ok = "APEX_BTN_MAPPINGS" in base_content
-        return {"applied": const_ok and base_ok, "const_patched": const_ok, "base_patched": base_ok}
+        # hid_v2 patch is optional — only check if the file exists
+        hid_v2_ok = True
+        if hid_v2_file:
+            with open(hid_v2_file) as f:
+                hid_v2_content = f.read()
+            hid_v2_ok = "# Apex back paddles" in hid_v2_content
+        return {
+            "applied": const_ok and base_ok and hid_v2_ok,
+            "const_patched": const_ok,
+            "base_patched": base_ok,
+            "hid_v2_patched": hid_v2_ok,
+        }
     except Exception as e:
         return {"applied": False, "error": str(e)}
 
 
-def _save_backups(const_file, base_file):
+def _save_backups(const_file, base_file, hid_v2_file=None):
     """Save original HHD files before patching."""
     os.makedirs(BACKUP_DIR, exist_ok=True)
     const_backup = os.path.join(BACKUP_DIR, "const.py.bak")
@@ -133,6 +158,10 @@ def _save_backups(const_file, base_file):
     shutil.copy2(const_file, const_backup)
     shutil.copy2(base_file, base_backup)
     meta = {"const_file": const_file, "base_file": base_file}
+    if hid_v2_file:
+        hid_v2_backup = os.path.join(BACKUP_DIR, "hid_v2.py.bak")
+        shutil.copy2(hid_v2_file, hid_v2_backup)
+        meta["hid_v2_file"] = hid_v2_file
     with open(BACKUP_META, "w") as f:
         json.dump(meta, f)
     _log_info(f"Backups saved to {BACKUP_DIR}")
@@ -158,8 +187,10 @@ def revert():
 
     const_file = meta["const_file"]
     base_file = meta["base_file"]
+    hid_v2_file = meta.get("hid_v2_file")
     const_backup = os.path.join(BACKUP_DIR, "const.py.bak")
     base_backup = os.path.join(BACKUP_DIR, "base.py.bak")
+    hid_v2_backup = os.path.join(BACKUP_DIR, "hid_v2.py.bak")
 
     if not os.path.exists(const_backup) or not os.path.exists(base_backup):
         return {"success": False, "error": "Backup files missing", "steps": steps}
@@ -171,6 +202,8 @@ def revert():
     try:
         shutil.copy2(const_backup, const_file)
         shutil.copy2(base_backup, base_file)
+        if hid_v2_file and os.path.exists(hid_v2_backup):
+            shutil.copy2(hid_v2_backup, hid_v2_file)
         steps.append("Restored original files from backup")
     except Exception as e:
         return {"success": False, "error": f"Failed to restore files: {e}", "steps": steps}
@@ -318,8 +351,8 @@ def apply():
     if status.get("applied"):
         return {"success": True, "message": "Already applied", "steps": ["Already applied"]}
 
-    const_file, base_file = _find_hhd_files()
-    _log_info(f"HHD files: const={const_file}, base={base_file}")
+    const_file, base_file, hid_v2_file = _find_hhd_files()
+    _log_info(f"HHD files: const={const_file}, base={base_file}, hid_v2={hid_v2_file}")
     if not const_file or not base_file:
         return {"success": False, "error": "HHD oxp files not found", "steps": steps}
 
@@ -329,7 +362,7 @@ def apply():
 
     # Save backups for user-facing revert (always refresh if files changed)
     try:
-        _save_backups(const_file, base_file)
+        _save_backups(const_file, base_file, hid_v2_file)
         steps.append("Saved backups")
     except Exception as e:
         return {"success": False, "error": f"Failed to save backups: {e}", "steps": steps}
@@ -337,11 +370,15 @@ def apply():
     # Read originals for rollback on partial failure
     const_backup = None
     base_backup = None
+    hid_v2_backup = None
     try:
         with open(const_file) as f:
             const_backup = f.read()
         with open(base_file) as f:
             base_backup = f.read()
+        if hid_v2_file:
+            with open(hid_v2_file) as f:
+                hid_v2_backup = f.read()
     except Exception as e:
         return {"success": False, "error": f"Failed to read files for backup: {e}", "steps": steps}
 
@@ -363,6 +400,15 @@ def apply():
         except Exception as e:
             errors.append(f"base.py: {e}")
 
+    # Patch hid_v2.py (back paddle remapping)
+    if hid_v2_file and not status.get("hid_v2_patched"):
+        try:
+            _patch_hid_v2(hid_v2_file)
+            steps.append("Patched hid_v2.py (back paddles → L4/R4)")
+        except Exception as e:
+            _log_warning(f"hid_v2.py patch failed (non-fatal): {e}")
+            steps.append(f"hid_v2.py patch skipped: {e}")
+
     if errors:
         # Rollback on partial failure
         _log_warning("Rolling back due to errors")
@@ -374,6 +420,9 @@ def apply():
             if base_backup is not None:
                 with open(base_file, "w") as f:
                     f.write(base_backup)
+            if hid_v2_backup is not None and hid_v2_file:
+                with open(hid_v2_file, "w") as f:
+                    f.write(hid_v2_backup)
         except Exception as rollback_err:
             _log_error(f"Rollback failed: {rollback_err}")
         return {"success": False, "error": "; ".join(errors), "steps": steps}
@@ -543,6 +592,62 @@ def _patch_base(base_file):
     with open(base_file, 'w') as f:
         f.write(content)
     _log_info("base.py patched")
+
+
+def _patch_hid_v2(hid_v2_file):
+    """Patch hid_v2.py to add Apex back paddle byte values to OXP_BUTTONS.
+
+    The Apex back paddles appear as gamepad B/Y because their HID byte values
+    aren't in OXP_BUTTONS. We add entries so HHD maps them to extra_l1/extra_r1
+    (L4/R4) instead.
+    """
+    with open(hid_v2_file) as f:
+        content = f.read()
+
+    if "# Apex back paddles" in content:
+        return  # Already patched
+
+    # Find the OXP_BUTTONS dict and add Apex entries
+    # The dict looks like:
+    #   OXP_BUTTONS = {
+    #       0x24: KBD_NAME,
+    #       0x21: HOME_NAME,
+    #       0x22: "extra_l1",
+    #       0x23: "extra_r1",
+    #   }
+    # We insert Apex-specific entries before the closing brace.
+    apex_entries = (
+        f'    # Apex back paddles\n'
+        f'    {hex(APEX_L4_BYTE)}: "extra_l1",\n'
+        f'    {hex(APEX_R4_BYTE)}: "extra_r1",\n'
+    )
+
+    # Strategy: find the last entry in OXP_BUTTONS and append after it
+    oxp_buttons_pattern = r'(OXP_BUTTONS\s*=\s*\{[^}]*)(})'
+    match = re.search(oxp_buttons_pattern, content, re.DOTALL)
+    if not match:
+        raise RuntimeError("Could not find OXP_BUTTONS dict in hid_v2.py")
+
+    # Check if our byte values are already present (avoid duplicates)
+    existing_block = match.group(1)
+    l4_hex = hex(APEX_L4_BYTE)
+    r4_hex = hex(APEX_R4_BYTE)
+    if l4_hex in existing_block and r4_hex in existing_block:
+        _log_info("OXP_BUTTONS already contains Apex byte values — adding marker only")
+        # Add a comment marker so is_applied() detects it
+        content = content.replace(
+            match.group(0),
+            match.group(1) + "    # Apex back paddles\n" + match.group(2),
+        )
+    else:
+        content = content.replace(
+            match.group(0),
+            match.group(1) + apex_entries + match.group(2),
+        )
+
+    with open(hid_v2_file, 'w') as f:
+        f.write(content)
+    _log_info("hid_v2.py patched — added Apex back paddle byte mappings")
 
 
 if __name__ == "__main__":

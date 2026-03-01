@@ -5,6 +5,7 @@
 # 1. Add the Apex as a known device with hid_v2 protocol
 # 2. Use the correct keyboard device (1a86:fe00 instead of AT keyboard)
 # 3. Map KEY_G to Home button (Apex uses KEY_G, not KEY_D like F1)
+# 4. Add back paddle byte values to OXP_BUTTONS in hid_v2.py (L4/R4)
 #
 # Button mapping on the Apex (from event8 / HID 1a86:fe00):
 #   KB button:    KEY_LEFTCTRL + KEY_LEFTMETA + KEY_O  → "keyboard"
@@ -33,18 +34,21 @@ fi
 # Find HHD files
 CONST_FILE="/usr/lib/python3.14/site-packages/hhd/device/oxp/const.py"
 BASE_FILE="/usr/lib/python3.14/site-packages/hhd/device/oxp/base.py"
+HID_V2_FILE="/usr/lib/python3.14/site-packages/hhd/device/oxp/hid_v2.py"
 
 if [[ ! -f "$CONST_FILE" ]]; then
     CONST_FILE=$(find /usr/lib/python3* -path "*/hhd/device/oxp/const.py" 2>/dev/null | head -1)
     BASE_FILE=$(find /usr/lib/python3* -path "*/hhd/device/oxp/base.py" 2>/dev/null | head -1)
+    HID_V2_FILE=$(find /usr/lib/python3* -path "*/hhd/device/oxp/hid_v2.py" 2>/dev/null | head -1)
     if [[ -z "$CONST_FILE" || -z "$BASE_FILE" ]]; then
         error "Could not find HHD oxp files"
         exit 1
     fi
 fi
 
-info "HHD const: $CONST_FILE"
-info "HHD base:  $BASE_FILE"
+info "HHD const:  $CONST_FILE"
+info "HHD base:   $BASE_FILE"
+info "HHD hid_v2: ${HID_V2_FILE:-not found}"
 
 # Unlock immutable filesystem
 info "Unlocking filesystem for hotfix..."
@@ -207,6 +211,54 @@ with open(base_file, 'w') as f:
     f.write(content)
 print('base.py patched')
 "
+
+# Patch hid_v2.py (back paddle remapping)
+if [[ -n "$HID_V2_FILE" && -f "$HID_V2_FILE" ]]; then
+    info "Patching hid_v2.py (back paddles → L4/R4)..."
+    python3 -c "
+import re
+hid_v2_file = '$HID_V2_FILE'
+
+with open(hid_v2_file) as f:
+    content = f.read()
+
+if '# Apex back paddles' in content:
+    print('Already patched')
+    exit(0)
+
+# Placeholder byte values — update after capturing raw HID reports:
+#   sudo systemctl stop hhd
+#   sudo cat /dev/hidrawN | xxd   (press each paddle, note the byte)
+APEX_L4_BYTE = 0x22  # TODO: replace with actual Apex L4 paddle byte
+APEX_R4_BYTE = 0x23  # TODO: replace with actual Apex R4 paddle byte
+
+apex_entries = (
+    '    # Apex back paddles\n'
+    f'    {hex(APEX_L4_BYTE)}: \"extra_l1\",\n'
+    f'    {hex(APEX_R4_BYTE)}: \"extra_r1\",\n'
+)
+
+# Find OXP_BUTTONS dict and add entries before closing brace
+match = re.search(r'(OXP_BUTTONS\s*=\s*\{[^}]*)(})', content, re.DOTALL)
+if not match:
+    print('WARNING: Could not find OXP_BUTTONS dict — skipping')
+    exit(0)
+
+existing = match.group(1)
+l4_hex = hex(APEX_L4_BYTE)
+r4_hex = hex(APEX_R4_BYTE)
+if l4_hex in existing and r4_hex in existing:
+    content = content.replace(match.group(0), existing + '    # Apex back paddles\n' + match.group(2))
+else:
+    content = content.replace(match.group(0), existing + apex_entries + match.group(2))
+
+with open(hid_v2_file, 'w') as f:
+    f.write(content)
+print('hid_v2.py patched')
+"
+else
+    warn "hid_v2.py not found — skipping back paddle patch"
+fi
 
 # Restart HHD
 info "Restarting HHD..."
