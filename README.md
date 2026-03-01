@@ -163,6 +163,10 @@ These fixes become obsolete when:
 - **Keyboard HID:** USB VID `1a86`, PID `FE00`
 - **EC PWM range:** 0–184 native (scaled to 0–255 for sysfs)
 
+## Disclaimer
+
+This software is provided "as is", without warranty of any kind, express or implied. Use it at your own risk. The author accepts no responsibility or liability for any damage, data loss, or other issues caused by using this software. These fixes modify system files, kernel parameters, and interact directly with hardware registers — make sure you understand what they do before applying them.
+
 ## License
 
 MIT
