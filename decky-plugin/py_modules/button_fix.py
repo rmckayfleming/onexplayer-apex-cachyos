@@ -140,8 +140,11 @@ def is_applied():
             with open(hid_v2_file) as f:
                 hid_v2_content = f.read()
             hid_v2_ok = "# Apex back paddles" in hid_v2_content
+        # "applied" is based on const+base only — these are the core patches.
+        # hid_v2 is an additive enhancement; its absence shouldn't flip the
+        # toggle to "Not applied" for users who already have the old patch.
         return {
-            "applied": const_ok and base_ok and hid_v2_ok,
+            "applied": const_ok and base_ok,
             "const_patched": const_ok,
             "base_patched": base_ok,
             "hid_v2_patched": hid_v2_ok,
@@ -348,7 +351,7 @@ def apply():
 
     status = is_applied()
     _log_info(f"Current patch status: {status}")
-    if status.get("applied"):
+    if status.get("applied") and status.get("hid_v2_patched"):
         return {"success": True, "message": "Already applied", "steps": ["Already applied"]}
 
     const_file, base_file, hid_v2_file = _find_hhd_files()
@@ -360,12 +363,35 @@ def apply():
     if not _unlock_filesystem(const_file, steps):
         return {"success": False, "error": "Filesystem is not writable. ostree unlock failed — check logs for details.", "steps": steps}
 
-    # Save backups for user-facing revert (always refresh if files changed)
-    try:
-        _save_backups(const_file, base_file, hid_v2_file)
-        steps.append("Saved backups")
-    except Exception as e:
-        return {"success": False, "error": f"Failed to save backups: {e}", "steps": steps}
+    # Save backups for user-facing revert.
+    # Only save if no backups exist yet — preserves the original pristine files
+    # even if apply() is called again (e.g. to add the hid_v2 patch on top of
+    # an existing const/base patch).
+    if not _has_backups():
+        try:
+            _save_backups(const_file, base_file, hid_v2_file)
+            steps.append("Saved backups")
+        except Exception as e:
+            return {"success": False, "error": f"Failed to save backups: {e}", "steps": steps}
+    else:
+        # Backups exist from a previous apply. If hid_v2 was added after the
+        # initial backup, save it separately so revert can restore it too.
+        if hid_v2_file:
+            hid_v2_backup = os.path.join(BACKUP_DIR, "hid_v2.py.bak")
+            if not os.path.exists(hid_v2_backup):
+                try:
+                    shutil.copy2(hid_v2_file, hid_v2_backup)
+                    # Update metadata to include hid_v2
+                    with open(BACKUP_META) as f:
+                        meta = json.load(f)
+                    if "hid_v2_file" not in meta:
+                        meta["hid_v2_file"] = hid_v2_file
+                        with open(BACKUP_META, "w") as f:
+                            json.dump(meta, f)
+                    _log_info("Added hid_v2.py backup to existing backup set")
+                except Exception as e:
+                    _log_warning(f"Failed to backup hid_v2.py: {e}")
+        steps.append("Using existing backups")
 
     # Read originals for rollback on partial failure
     const_backup = None
