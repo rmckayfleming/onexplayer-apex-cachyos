@@ -80,38 +80,46 @@ sudo bash scripts/setup-home-button.sh
 
 ## Installation
 
-### Option A: Download from GitHub Releases (Easiest)
+Make sure [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) is installed on your Bazzite system before proceeding.
 
-1. Make sure [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) is installed on your Bazzite system
-2. Go to the [Releases](https://github.com/srsholmes/onexplayer-apex-bazzite-fixes/releases) page
-3. Download `OneXPlayer_Apex_Tools.zip` from the latest release
-4. Extract it to Decky's plugin directory:
+### Option A: Install via Decky Developer Mode (Recommended)
+
+1. Download `OneXPlayer_Apex_Tools.zip` from the [Releases](https://github.com/srsholmes/onexplayer-apex-bazzite-fixes/releases) page
+2. Enable Developer mode in Decky Loader:
+   - Open the QAM sidebar (press the `...` button)
+   - Go to the Decky tab (plug icon)
+   - Open the settings gear icon (top right)
+   - Toggle **Developer mode** on
+3. Install the plugin from the zip file:
+   - In the Decky settings page, a new **Developer** section will appear
+   - Click **Install Plugin from ZIP File**
+   - Navigate to where you saved `OneXPlayer_Apex_Tools.zip` and select it
+   - Decky will install the plugin and it will appear in the QAM sidebar automatically
+
+### Option B: Install Manually via Terminal
+
+1. Download `OneXPlayer_Apex_Tools.zip` from the [Releases](https://github.com/srsholmes/onexplayer-apex-bazzite-fixes/releases) page
+2. Extract it to Decky's plugin directory and restart the loader:
    ```bash
    sudo unzip OneXPlayer_Apex_Tools.zip -d ~/homebrew/plugins/
    sudo systemctl restart plugin_loader.service
    ```
-5. Open the QAM sidebar in Game Mode — "OXP Apex Tools" should appear
+3. Open the QAM sidebar in Game Mode — "OXP Apex Tools" should appear
 
-### Option B: Build from Source
+### Option C: Build from Source
 
-1. Make sure [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) is installed
-2. Install [bun](https://bun.sh):
+1. Install [bun](https://bun.sh):
    ```bash
    curl -fsSL https://bun.sh/install | bash
    ```
-3. Build and package the plugin:
+2. Build and package the plugin:
    ```bash
    cd decky-plugin
    bun install
    bun run build
    bun run package
    ```
-4. Extract the built zip to Decky's plugin directory:
-   ```bash
-   sudo unzip OneXPlayer_Apex_Tools.zip -d ~/homebrew/plugins/
-   sudo systemctl restart plugin_loader.service
-   ```
-5. Open the QAM sidebar in Game Mode — "OXP Apex Tools" should appear
+3. Install using either Option A or Option B above (the zip will be in `decky-plugin/`)
 
 ## Important Notes
 
