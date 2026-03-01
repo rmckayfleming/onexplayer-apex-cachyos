@@ -123,6 +123,8 @@ Make sure [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) is i
 
 ## Important Notes
 
+- **Sleep fix is not working yet.** The sleep/suspend fix scripts are still a work in progress and do not currently resolve the issue. It is best to avoid using them for now.
+
 - **Temporary fixes.** The button fix patches files in `/usr/lib/` which get overwritten on every Bazzite update. You'll need to re-apply after updates. The sleep fix kernel params persist across updates.
 
 - **Requires root.** The Decky plugin runs with the `root` flag. The standalone scripts require `sudo`.
@@ -162,6 +164,10 @@ These fixes become obsolete when:
 - **Cooling:** Dual-fan, 5400 RPM max
 - **Keyboard HID:** USB VID `1a86`, PID `FE00`
 - **EC PWM range:** 0–184 native (scaled to 0–255 for sysfs)
+
+## Disclaimer
+
+This software is provided "as is", without warranty of any kind, express or implied. Use it at your own risk. The author accepts no responsibility or liability for any damage, data loss, or other issues caused by using this software. These fixes modify system files, kernel parameters, and interact directly with hardware registers — make sure you understand what they do before applying them.
 
 ## License
 
