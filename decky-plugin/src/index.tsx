@@ -74,6 +74,54 @@ const PROFILE_OPTIONS: ProfileOption[] = [
   { data: "custom", label: "Custom (slider)" },
 ];
 
+const FanSpeedSlider: FC<{ speed: number; onCommit: (value: number) => Promise<void> }> = ({
+  speed,
+  onCommit,
+}) => {
+  const [local, setLocal] = useState(speed);
+  const activeRef = useRef(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+
+  // Sync from parent only when the user isn't dragging
+  useEffect(() => {
+    if (!activeRef.current) {
+      setLocal(speed);
+    }
+  }, [speed]);
+
+  // Cleanup on unmount
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
+
+  const handleChange = useCallback(
+    (value: number) => {
+      setLocal(value);
+      activeRef.current = true;
+
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(async () => {
+        try {
+          await onCommit(value);
+        } finally {
+          activeRef.current = false;
+        }
+      }, 300);
+    },
+    [onCommit],
+  );
+
+  return (
+    <SliderField
+      label="Fan Speed"
+      value={local}
+      min={0}
+      max={100}
+      step={5}
+      showValue
+      onChange={handleChange}
+    />
+  );
+};
+
 const InlineStatus: FC<{ loading: LoadingState; result: ResultMessage | null; section: string }> = ({
   loading,
   result,
@@ -241,10 +289,16 @@ const Content: FC = () => {
     }
   };
 
-  const handleFanSpeed = async (value: number) => {
+  const handleFanSpeed = useCallback(async (value: number) => {
     await setFanSpeed(value);
     setFan((prev: FanStatus) => ({ ...prev, speed: value, profile: "custom" }));
-  };
+    try {
+      const status = await getFanStatus();
+      setFan(status);
+    } catch (_) {
+      // sync failed — local optimistic update already applied
+    }
+  }, []);
 
   const handleFanProfile = async (profile: string) => {
     setLoading({ active: "profile", message: "Setting fan profile..." });
@@ -368,15 +422,7 @@ const Content: FC = () => {
 
                 {fan.profile === "custom" && (
                   <PanelSectionRow>
-                    <SliderField
-                      label="Fan Speed"
-                      value={fan.speed ?? 50}
-                      min={0}
-                      max={100}
-                      step={5}
-                      showValue
-                      onChange={handleFanSpeed}
-                    />
+                    <FanSpeedSlider speed={fan.speed ?? 50} onCommit={handleFanSpeed} />
                   </PanelSectionRow>
                 )}
               </>
