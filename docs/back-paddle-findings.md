@@ -122,3 +122,19 @@ os.close(fd)
 ```
 
 Note: The actual hidraw number may vary — use `find_vendor_hidraw()` from `back_paddle.py` to find the correct one dynamically.
+
+## Implementation Notes
+
+### python-evdev Not Available in Decky
+Decky Loader bundles its own Python (PyInstaller) which does NOT include `python-evdev`. The initial implementation failed with `python-evdev not available`.
+
+**Solution**: Replaced with raw `/dev/uinput` ioctl calls using only stdlib (`struct`, `fcntl`, `ctypes`, `os`). The `RawUinputDevice` class in `back_paddle.py` handles:
+- `UI_SET_EVBIT` / `UI_SET_KEYBIT` to register capabilities
+- `UI_DEV_SETUP` with `struct uinput_setup` for device identity
+- `UI_DEV_CREATE` / `UI_DEV_DESTROY` lifecycle
+- Writing `struct input_event` packets for key press/release + SYN_REPORT
+
+### Confirmed Working (Desktop Mode)
+- Plugin restart logs show: "Created uinput device: OXP Apex Back Paddles" + "Back paddle intercept mode enabled"
+- Device auto-detected at `/dev/hidraw5` (vendor interface, usage page 0xFF00)
+- Pending: Game Mode testing with Steam Input remapping

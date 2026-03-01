@@ -11,24 +11,30 @@ This module:
 3. Reads 64-byte button reports in a loop
 4. Emits BTN_TRIGGER_HAPPY1 (L4) and BTN_TRIGGER_HAPPY2 (R4) via uinput
 
+Uses raw /dev/uinput ioctl calls — no external dependencies needed.
+
 Steam Input recognizes BTN_TRIGGER_HAPPY1/2 as back paddle buttons
 (like the Steam Deck's L4/R4) and lets users remap them per-game.
 
 HID v1 protocol:
-  gen_cmd_v1(cid, cmd) → 64-byte packet
+  gen_cmd_v1(cid, cmd) -> 64-byte packet
   INTERCEPT_ON  = gen_cmd_v1(0xB2, [0x03, 0x01, 0x02])
   INTERCEPT_OFF = gen_cmd_v1(0xB2, [0x00, 0x01, 0x02])
 
 Button report (64 bytes, byte[0]==0xB2):
-  byte[3] == 0x01 → button event (vs 0x03=ack, 0x02=gamepad state)
-  byte[6] → button code: 0x22=L4, 0x23=R4
-  byte[12] → state: 0x01=pressed, 0x02=released
+  byte[3] == 0x01 -> button event (vs 0x03=ack, 0x02=gamepad state)
+  byte[6] -> button code: 0x22=L4, 0x23=R4
+  byte[12] -> state: 0x01=pressed, 0x02=released
 """
 
 import asyncio
+import ctypes
+import fcntl
 import glob
 import logging
 import os
+import struct
+import time
 
 logger = logging.getLogger("OXP-BackPaddle")
 
@@ -137,34 +143,87 @@ def find_vendor_hidraw():
     return None
 
 
-# Try to import evdev for uinput virtual device creation
-try:
-    import evdev
-    from evdev import UInput, ecodes
-    _HAS_EVDEV = True
-except ImportError:
-    _HAS_EVDEV = False
+# ── Raw uinput constants and helpers ──
+# No external dependencies — uses ioctl directly against /dev/uinput.
+
+# Linux input event types / codes
+EV_SYN = 0x00
+EV_KEY = 0x01
+SYN_REPORT = 0x00
+BTN_TRIGGER_HAPPY1 = 0x2C0
+BTN_TRIGGER_HAPPY2 = 0x2C1
+BUS_VIRTUAL = 0x06
+
+# uinput ioctl numbers
+UI_SET_EVBIT = 0x40045564   # _IOW('U', 100, int)
+UI_SET_KEYBIT = 0x40045565  # _IOW('U', 101, int)
+UI_DEV_SETUP = 0x405C5503   # _IOW('U', 3, struct uinput_setup)
+UI_DEV_CREATE = 0x5501       # _IO('U', 1)
+UI_DEV_DESTROY = 0x5502      # _IO('U', 2)
+
+# struct input_id: bustype(u16), vendor(u16), product(u16), version(u16)
+# struct uinput_setup: input_id(8 bytes), name(80 bytes), ff_effects_max(u32) = 92 bytes
+UINPUT_SETUP_FMT = "HHHh80sI"
+
+# struct input_event: tv_sec(long), tv_usec(long), type(u16), code(u16), value(i32)
+INPUT_EVENT_FMT = "llHHi"
 
 
-def _create_uinput_device():
-    """Create a virtual gamepad with BTN_TRIGGER_HAPPY1 and BTN_TRIGGER_HAPPY2."""
-    if not _HAS_EVDEV:
-        return None
+class RawUinputDevice:
+    """Minimal uinput wrapper using raw ioctl — no python-evdev needed."""
 
-    capabilities = {
-        ecodes.EV_KEY: [
-            ecodes.BTN_TRIGGER_HAPPY1,
-            ecodes.BTN_TRIGGER_HAPPY2,
-        ],
-    }
-    device = UInput(
-        capabilities,
-        name="OXP Apex Back Paddles",
-        bustype=ecodes.BUS_VIRTUAL,
-        vendor=0x1A86,
-        product=0xFE01,  # Distinct from the real device
-    )
-    return device
+    def __init__(self):
+        self._fd = -1
+
+    def create(self):
+        self._fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
+
+        # Enable EV_KEY
+        fcntl.ioctl(self._fd, UI_SET_EVBIT, EV_KEY)
+        # Enable the two button codes
+        fcntl.ioctl(self._fd, UI_SET_KEYBIT, BTN_TRIGGER_HAPPY1)
+        fcntl.ioctl(self._fd, UI_SET_KEYBIT, BTN_TRIGGER_HAPPY2)
+
+        # Setup device identity
+        name = b"OXP Apex Back Paddles"
+        name_padded = name + b"\x00" * (80 - len(name))
+        setup_data = struct.pack(
+            UINPUT_SETUP_FMT,
+            BUS_VIRTUAL,   # bustype
+            0x1A86,        # vendor
+            0xFE01,        # product (distinct from real device)
+            1,             # version
+            name_padded,   # name
+            0,             # ff_effects_max
+        )
+        fcntl.ioctl(self._fd, UI_DEV_SETUP, setup_data)
+        fcntl.ioctl(self._fd, UI_DEV_CREATE)
+        # Small delay for device node to appear
+        time.sleep(0.1)
+
+    def emit(self, ev_type, code, value):
+        """Write a single input event."""
+        now = time.time()
+        sec = int(now)
+        usec = int((now - sec) * 1_000_000)
+        event = struct.pack(INPUT_EVENT_FMT, sec, usec, ev_type, code, value)
+        os.write(self._fd, event)
+
+    def syn(self):
+        """Send a SYN_REPORT to flush the event."""
+        self.emit(EV_SYN, SYN_REPORT, 0)
+
+    def close(self):
+        if self._fd >= 0:
+            try:
+                fcntl.ioctl(self._fd, UI_DEV_DESTROY)
+            except OSError:
+                pass
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = -1
 
 
 class BackPaddleMonitor:
@@ -182,10 +241,6 @@ class BackPaddleMonitor:
         """Main monitoring loop — enables intercept and reads paddle reports."""
         self._running = True
 
-        if not _HAS_EVDEV:
-            _log_error("python-evdev not available — back paddle monitor cannot start")
-            return
-
         while self._running:
             dev_path = find_vendor_hidraw()
             if not dev_path:
@@ -198,13 +253,10 @@ class BackPaddleMonitor:
             fd = -1
             try:
                 fd = os.open(dev_path, os.O_RDWR | os.O_NONBLOCK)
-                uinput_dev = _create_uinput_device()
-                if not uinput_dev:
-                    _log_error("Failed to create uinput device")
-                    os.close(fd)
-                    fd = -1
-                    await asyncio.sleep(5)
-                    continue
+
+                uinput_dev = RawUinputDevice()
+                uinput_dev.create()
+                _log_info("Created uinput device: OXP Apex Back Paddles")
 
                 # Enable intercept mode
                 os.write(fd, INTERCEPT_ON)
@@ -234,20 +286,20 @@ class BackPaddleMonitor:
                     state = data[12]
 
                     if button_code == BTN_L4:
-                        evdev_btn = ecodes.BTN_TRIGGER_HAPPY1
+                        evdev_btn = BTN_TRIGGER_HAPPY1
                         label = "L4"
                     elif button_code == BTN_R4:
-                        evdev_btn = ecodes.BTN_TRIGGER_HAPPY2
+                        evdev_btn = BTN_TRIGGER_HAPPY2
                         label = "R4"
                     else:
                         continue
 
                     if state == STATE_PRESSED:
-                        uinput_dev.write(ecodes.EV_KEY, evdev_btn, 1)
+                        uinput_dev.emit(EV_KEY, evdev_btn, 1)
                         uinput_dev.syn()
                         _log_info(f"Back paddle {label} pressed")
                     elif state == STATE_RELEASED:
-                        uinput_dev.write(ecodes.EV_KEY, evdev_btn, 0)
+                        uinput_dev.emit(EV_KEY, evdev_btn, 0)
                         uinput_dev.syn()
                         _log_info(f"Back paddle {label} released")
 
