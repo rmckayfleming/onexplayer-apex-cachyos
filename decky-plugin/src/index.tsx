@@ -385,11 +385,11 @@ const Content: FC = () => {
               <>
                 <PanelSectionRow>
                   <ToggleField
-                    label="Full Controller Mode"
+                    label="Back Paddle Support"
                     description={
                       buttonFix.intercept_enabled !== false
-                        ? "All input via HHD — back paddles as separate buttons"
-                        : "Face buttons only — just Home + QAM, gamepad normal"
+                        ? "ON — L4/R4 back paddles enabled"
+                        : "OFF — Standard gamepad mode"
                     }
                     checked={buttonFix.intercept_enabled !== false}
                     disabled={loading.active === "intercept"}
@@ -410,8 +410,8 @@ const Content: FC = () => {
                     }}
                   >
                     {buttonFix.intercept_enabled !== false
-                      ? "Back paddles (L4/R4) are mapped as extra buttons via HHD. Configure them in Steam Input controller settings (per-game or global)."
-                      : "Face buttons only mode: Home and QAM buttons work, Xbox gamepad handles everything else normally. Toggle on for back paddle support."}
+                      ? "Back paddles (L4/R4) work as extra buttons. You can remap them in Steam Input settings (per-game or global). If you experience stick drift or input issues, switch this off."
+                      : "Standard mode — Home and QAM buttons work, all other input handled by the default gamepad driver. Turn this on to enable L4/R4 back paddles."}
                   </div>
                 </PanelSectionRow>
               </>
