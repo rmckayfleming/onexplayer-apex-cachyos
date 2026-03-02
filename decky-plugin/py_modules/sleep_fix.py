@@ -1,11 +1,14 @@
-"""Sleep/suspend fix for OneXPlayer Apex (Strix Halo) on Bazzite.
+"""Sleep/suspend fix cleanup for OneXPlayer Apex (Strix Halo) on Bazzite.
 
-The Apex uses an AMD Strix Halo APU which has a known issue where
-suspend/resume fails due to IOMMU conflicts. Adding amd_iommu=off
-as a kernel parameter fixes wake-from-sleep.
+S0i3 deep sleep does NOT work on Strix Halo with kernel 6.17 — ACPI C4
+support (required for VDD OFF / S0i3) is missing until kernel 6.18+.
 
-This module applies the kernel parameter via rpm-ostree (Bazzite's atomic
-update system). The karg requires a reboot to take effect.
+Previous fix attempts applied various kernel parameters that either didn't
+help or made things worse (device hangs on sleep, requiring hard power off).
+This module provides cleanup: removing all previously applied kargs and
+udev rules so the system is in a clean state.
+
+No sleep fix is applied — there is no working fix until kernel 6.18+.
 """
 
 import logging
@@ -23,40 +26,45 @@ def _clean_env():
     return env
 
 
-KARG = "amd_iommu=off"
-
-# Old kargs/udev from the previous sleep fix — cleaned up if found
-OLD_KARGS = [
-    "amdgpu.cwsr_enable=0",
+# ALL kargs we've ever applied across any version — remove() cleans all of them
+ALL_KARGS = [
+    # test/sleep branch
     "iommu=pt",
+    "acpi.ec_no_wakeup=1",
+    # main branch
+    "amd_iommu=off",
+    "amd_iommu=on",
+    # ancient attempts
+    "amdgpu.cwsr_enable=0",
     "amdgpu.gttsize=126976",
     "ttm.pages_limit=32505856",
 ]
-OLD_UDEV_RULE_PATH = "/etc/udev/rules.d/99-disable-spurious-wake.rules"
+
+# Udev rules we've ever created
+UDEV_RULES = [
+    "/etc/udev/rules.d/91-oxp-fingerprint-no-wakeup.rules",
+    "/etc/udev/rules.d/99-disable-spurious-wake.rules",
+]
 
 
 def get_status():
-    """Check whether the sleep fix kernel param is active."""
+    """Check which sleep fix kargs are currently present in the boot cmdline."""
     try:
         with open("/proc/cmdline") as f:
             cmdline = f.read()
     except Exception:
         cmdline = ""
 
-    applied = KARG in cmdline
+    kargs_found = [k for k in ALL_KARGS if k in cmdline]
 
     return {
-        "applied": applied,
-        "karg": KARG,
-        "karg_set": applied,
+        "has_kargs": len(kargs_found) > 0,
+        "kargs_found": kargs_found,
     }
 
 
-def apply():
-    """Apply the sleep fix. Returns status dict with reboot_needed flag.
-
-    Adds amd_iommu=off via rpm-ostree kargs. Also cleans up any old
-    sleep fix kargs/udev rules if present.
+def remove():
+    """Remove ALL sleep fix kargs and udev rules we've ever applied.
 
     WARNING: rpm-ostree kargs creates a new ostree deployment. Any
     ostree admin unlock --hotfix overlay (e.g. button fix patches)
@@ -71,52 +79,46 @@ def apply():
     except Exception:
         cmdline = ""
 
-    # Clean up old kargs if present
-    for old_karg in OLD_KARGS:
-        if old_karg in cmdline:
-            logger.info(f"Removing old karg: {old_karg}")
+    # Remove all sleep fix kargs
+    for karg in ALL_KARGS:
+        if karg in cmdline:
+            logger.info(f"Removing sleep fix karg: {karg}")
             try:
                 subprocess.run(
-                    ["rpm-ostree", "kargs", f"--delete={old_karg}"],
+                    ["rpm-ostree", "kargs", f"--delete={karg}"],
                     capture_output=True, timeout=60,
                     env=_clean_env()
                 )
                 reboot_needed = True
             except Exception as e:
-                logger.warning(f"Could not remove old karg {old_karg}: {e}")
+                logger.warning(f"Could not remove karg {karg}: {e}")
 
-    # Clean up old udev rule if present
-    if os.path.exists(OLD_UDEV_RULE_PATH):
+    # Remove udev rules
+    reload_udev = False
+    for rule_path in UDEV_RULES:
+        if os.path.exists(rule_path):
+            try:
+                os.remove(rule_path)
+                logger.info(f"Removed udev rule: {rule_path}")
+                reload_udev = True
+            except Exception as e:
+                logger.warning(f"Could not remove udev rule {rule_path}: {e}")
+
+    if reload_udev:
         try:
-            os.remove(OLD_UDEV_RULE_PATH)
             subprocess.run(
                 ["udevadm", "control", "--reload-rules"],
                 capture_output=True, timeout=10,
                 env=_clean_env()
             )
-            logger.info("Removed old udev rule")
         except Exception as e:
-            logger.warning(f"Could not remove old udev rule: {e}")
+            logger.warning(f"Could not reload udev rules: {e}")
 
-    # Apply the actual fix
-    if KARG in cmdline:
-        logger.info(f"Already set: {KARG}")
-    else:
-        logger.info(f"Adding karg: {KARG}")
-        try:
-            subprocess.run(
-                ["rpm-ostree", "kargs", f"--append-if-missing={KARG}"],
-                capture_output=True, timeout=60,
-                env=_clean_env()
-            )
-            reboot_needed = True
-        except Exception as e:
-            logger.error(f"Failed to add karg {KARG}: {e}")
-            return {"success": False, "error": f"Failed to add karg {KARG}: {e}"}
-
-    msg = "Reboot required for kernel param" if reboot_needed else "Sleep fix already applied"
     if reboot_needed:
-        msg += ". Note: button fix patches will need to be re-applied after reboot."
+        msg = "Sleep fix kargs removed. Reboot required."
+        msg += " Note: button fix patches will need to be re-applied after reboot."
+    else:
+        msg = "No sleep fix kargs found to remove."
 
     return {
         "success": True,

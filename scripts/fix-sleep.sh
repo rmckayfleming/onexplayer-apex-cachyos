@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# fix-sleep.sh — Apply sleep/suspend fix for OneXPlayer Apex (Strix Halo) on Bazzite
+# fix-sleep.sh — Remove ALL sleep fix kernel parameters for OneXPlayer Apex on Bazzite
 #
-# Adds amd_iommu=off kernel parameter to fix wake-from-sleep.
-# Also cleans up any old sleep fix kargs/udev rules if present.
-# Requires a reboot to take effect.
+# S0i3 deep sleep does NOT work on Strix Halo with kernel 6.17 — ACPI C4 support
+# is missing until kernel 6.18+. Previous fix attempts applied various kargs that
+# either didn't help or caused hangs on sleep.
+#
+# This script removes ALL previously applied sleep fix kargs and udev rules to
+# restore default behavior. Requires a reboot if any kargs were removed.
 
 set -euo pipefail
 
@@ -21,11 +24,17 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# ---------- 1. Remove old sleep-fix kernel params ----------
+# ---------- 1. Remove ALL sleep fix kernel params ----------
 
-OLD_KARGS=(
-    "amdgpu.cwsr_enable=0"
+ALL_KARGS=(
+    # test/sleep branch
     "iommu=pt"
+    "acpi.ec_no_wakeup=1"
+    # main branch
+    "amd_iommu=off"
+    "amd_iommu=on"
+    # ancient attempts
+    "amdgpu.cwsr_enable=0"
     "amdgpu.gttsize=126976"
     "ttm.pages_limit=32505856"
 )
@@ -33,65 +42,56 @@ OLD_KARGS=(
 CMDLINE=$(cat /proc/cmdline)
 REBOOT_NEEDED=false
 
-info "Removing old sleep-fix kernel parameters..."
-for karg in "${OLD_KARGS[@]}"; do
+info "Checking for sleep fix kernel parameters to remove..."
+for karg in "${ALL_KARGS[@]}"; do
     if echo "$CMDLINE" | grep -q "$karg"; then
         info "  Removing: $karg"
-        rpm-ostree kargs --delete="$karg" 2>/dev/null || warn "  Could not remove $karg (may not be set as a separate karg)"
+        rpm-ostree kargs --delete="$karg" 2>/dev/null || warn "  Could not remove $karg"
         REBOOT_NEEDED=true
     else
         info "  Not present: $karg (skipping)"
     fi
 done
 
-# ---------- 2. Remove udev rule ----------
+# ---------- 2. Remove udev rules ----------
 
-UDEV_RULE="/etc/udev/rules.d/99-disable-spurious-wake.rules"
+UDEV_RULES=(
+    "/etc/udev/rules.d/91-oxp-fingerprint-no-wakeup.rules"
+    "/etc/udev/rules.d/99-disable-spurious-wake.rules"
+)
+RELOAD_UDEV=false
 
-if [[ -f "$UDEV_RULE" ]]; then
-    info "Removing udev rule: $UDEV_RULE"
-    rm -f "$UDEV_RULE"
+for rule in "${UDEV_RULES[@]}"; do
+    if [[ -f "$rule" ]]; then
+        info "Removing udev rule: $rule"
+        rm -f "$rule"
+        RELOAD_UDEV=true
+    fi
+done
+
+if $RELOAD_UDEV; then
     udevadm control --reload-rules
-    info "  Removed and reloaded udev rules"
-else
-    info "No old udev rule found (skipping)"
+    info "Reloaded udev rules"
 fi
 
-# ---------- 3. Apply the simple fix ----------
-
-NEW_KARG="amd_iommu=off"
-
-info "Applying new sleep fix: $NEW_KARG"
-if echo "$CMDLINE" | grep -q "$NEW_KARG"; then
-    info "  Already set: $NEW_KARG"
-else
-    rpm-ostree kargs --append-if-missing="$NEW_KARG"
-    REBOOT_NEEDED=true
-    info "  Added: $NEW_KARG"
-fi
-
-# ---------- 4. Summary ----------
+# ---------- 3. Summary ----------
 
 echo ""
-info "=== Sleep Fix v2 Summary ==="
-info "Removed old kargs: ${OLD_KARGS[*]}"
-info "Removed udev rule: $UDEV_RULE"
-info "Applied: $NEW_KARG"
+info "=== Sleep Fix Cleanup Summary ==="
+info "Checked kargs: ${ALL_KARGS[*]}"
+info "Checked udev rules: ${UDEV_RULES[*]}"
 
 if $REBOOT_NEEDED; then
     echo ""
-    warn "Kernel parameters were changed. A reboot is required."
+    warn "Kernel parameters were removed. A reboot is required."
+    warn "Note: button fix patches will need to be re-applied after reboot"
+    warn "      (rpm-ostree creates a new ostree deployment)."
     warn "Run: systemctl reboot"
 else
     echo ""
-    info "No changes needed. Everything already set."
+    info "No sleep fix kargs found. System is clean."
 fi
 
 echo ""
-info "After reboot, verify with:"
-info "  cat /proc/cmdline"
-echo ""
-info "To test suspend:"
-info "  sudo systemctl suspend"
-info "  # After wake, check for errors:"
-info "  journalctl -b | grep -i 'suspend\|resume\|amdgpu\|iommu\|error\|fail' | tail -30"
+info "S0i3 deep sleep is not supported on Strix Halo until kernel 6.18+."
+info "See docs/sleep-research.md for details."

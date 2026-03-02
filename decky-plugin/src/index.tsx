@@ -27,7 +27,10 @@ interface FanStatus {
 
 interface StatusResponse {
   button_fix: { applied: boolean; error?: string; home_monitor_running?: boolean; intercept_enabled?: boolean };
-  sleep_fix: { applied: boolean; karg: string; karg_set: boolean };
+  sleep_fix: {
+    has_kargs: boolean;
+    kargs_found: string[];
+  };
   fan: FanStatus;
 }
 
@@ -60,7 +63,7 @@ interface ResultMessage {
 const getStatus = callable<[], StatusResponse>("get_status");
 const applyButtonFix = callable<[], FixResult>("apply_button_fix");
 const revertButtonFix = callable<[], FixResult>("revert_button_fix");
-const applySleepFix = callable<[], FixResult>("apply_sleep_fix");
+const removeSleepFix = callable<[], FixResult>("remove_sleep_fix");
 const saveLogs = callable<[], { success: boolean; path?: string; error?: string }>("save_logs");
 const setFanMode = callable<[string], { success: boolean }>("set_fan_mode");
 const setFanSpeed = callable<[number], { success: boolean }>("set_fan_speed");
@@ -158,13 +161,12 @@ const Content: FC = () => {
     applied: false,
   });
   const [sleepFix, setSleepFix] = useState<{
-    applied: boolean;
-    karg_set: boolean;
+    has_kargs: boolean;
+    kargs_found: string[];
   }>({
-    applied: false,
-    karg_set: false,
+    has_kargs: false,
+    kargs_found: [],
   });
-  const [sleepReboot, setSleepReboot] = useState(false);
   const [fan, setFan] = useState<FanStatus>({ available: false });
   const [statusLoaded, setStatusLoaded] = useState(false);
   const [loading, setLoading] = useState<LoadingState>({ active: null, message: "" });
@@ -275,18 +277,15 @@ const Content: FC = () => {
     }
   };
 
-  const handleSleepFix = async (enabled: boolean) => {
-    if (!enabled) return;
-    setLoading({ active: "sleep", message: "Applying sleep fix (rpm-ostree)..." });
+  const handleRemoveSleepFix = async () => {
+    setLoading({ active: "sleep", message: "Removing sleep fix kargs (rpm-ostree)..." });
     try {
-      const res = await applySleepFix();
+      const res = await removeSleepFix();
       if (res.success) {
         if (res.reboot_needed) {
-          setSleepReboot(true);
-          showResult("sleep", "Applied — reboot to activate", "success");
+          showResult("sleep", "Removed — reboot required. Re-apply button fix after reboot.", "success");
         } else {
-          setSleepFix({ applied: true, karg_set: true });
-          showResult("sleep", "Already active", "success");
+          showResult("sleep", res.message || "No kargs to remove", "success");
         }
       } else {
         showResult("sleep", res.error || "Failed", "error");
@@ -418,37 +417,40 @@ const Content: FC = () => {
               </>
             )}
 
-            <PanelSectionRow>
-              <ToggleField
-                label="Sleep Fix"
-                description={
-                  sleepFix.applied
-                    ? sleepReboot
-                      ? "Applied — Reboot required for changes to take effect"
-                      : "Active (amd_iommu=off)"
-                    : "Not applied — adds amd_iommu=off kernel param"
-                }
-                checked={sleepFix.applied || sleepReboot}
-                disabled={sleepFix.applied || sleepReboot || loading.active === "sleep"}
-                onChange={handleSleepFix}
-              />
-            </PanelSectionRow>
-            <InlineStatus loading={loading} result={result} section="sleep" />
-            {sleepReboot && (
+            {sleepFix.has_kargs ? (
+              <>
+                <PanelSectionRow>
+                  <div
+                    style={{
+                      backgroundColor: "#4a3000",
+                      border: "1px solid #7a5000",
+                      borderRadius: "4px",
+                      padding: "8px 12px",
+                      fontSize: "11px",
+                      lineHeight: "1.4",
+                      color: "#ffcc00",
+                    }}
+                  >
+                    Previous sleep fix kargs detected: <strong>{sleepFix.kargs_found.join(", ")}</strong>.
+                    These don't work on Strix Halo (kernel 6.17) and may cause hangs on sleep.
+                    Remove them to restore default behavior.
+                  </div>
+                </PanelSectionRow>
+                <PanelSectionRow>
+                  <ButtonItem
+                    layout="below"
+                    onClick={handleRemoveSleepFix}
+                    disabled={loading.active === "sleep"}
+                  >
+                    Remove Sleep Fix Kargs
+                  </ButtonItem>
+                </PanelSectionRow>
+                <InlineStatus loading={loading} result={result} section="sleep" />
+              </>
+            ) : (
               <PanelSectionRow>
-                <div
-                  style={{
-                    backgroundColor: "#4a3000",
-                    border: "1px solid #7a5000",
-                    borderRadius: "4px",
-                    padding: "8px 12px",
-                    fontSize: "11px",
-                    lineHeight: "1.4",
-                    color: "#ffcc00",
-                  }}
-                >
-                  Reboot required to activate sleep fix. Note: button fix patches will need to be
-                  re-applied after reboot (rpm-ostree creates a new deployment).
+                <div style={{ fontSize: "11px", color: "#888", padding: "0 0 4px 0" }}>
+                  Sleep fix unavailable — S0i3 deep sleep requires kernel 6.18+ on Strix Halo.
                 </div>
               </PanelSectionRow>
             )}
