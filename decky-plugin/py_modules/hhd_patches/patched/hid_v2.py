@@ -144,7 +144,6 @@ class OxpHidrawV2(GenericGamepadHidraw):
         self.turbo = turbo
         self.apex_v1 = apex_v1
         self.prev_axes = {}
-        self._prev_rx_raw = 0
         self.dpad = {"up": False, "down": False, "left": False, "right": False}
 
         self.prev_brightness = None
@@ -159,7 +158,6 @@ class OxpHidrawV2(GenericGamepadHidraw):
         self.queue_home = None
         self.prev = {}
         self.prev_axes = {}
-        self._prev_rx_raw = 0
         self.dpad = {"up": False, "down": False, "left": False, "right": False}
         self.next_send = time.perf_counter() + INIT_DELAY
 
@@ -328,17 +326,18 @@ class OxpHidrawV2(GenericGamepadHidraw):
                 lx = max(-1.0, min(1.0, struct.unpack_from("<h", cmd, 17)[0] / 32768.0))
                 ly = max(-1.0, min(1.0, -(struct.unpack_from("<h", cmd, 19)[0] / 32768.0)))
 
-                # RX: the stick's physical range exceeds signed 16-bit at
-                # full deflection, causing the raw value to wrap (e.g.
-                # -31617 → +32767 at full left). Detect this by checking
-                # for a raw change > 50000 between frames, which can only
-                # be a 16-bit overflow (not real movement).
+                # RX: the stick's physical range (~±31700) exceeds signed
+                # 16-bit at full deflection. At full left the raw value
+                # wraps from ~-31617 to exactly +32767; at full right it
+                # wraps to exactly -32768. Only these exact boundary values
+                # indicate overflow — all other values are real positions.
                 rx_raw = struct.unpack_from("<h", cmd, 21)[0]
-                if abs(rx_raw - self._prev_rx_raw) > 50000:
-                    rx = -1.0 if self._prev_rx_raw < 0 else 1.0
+                if rx_raw == 32767:
+                    rx = -1.0   # overflowed from left extreme
+                elif rx_raw == -32768:
+                    rx = 1.0    # overflowed from right extreme
                 else:
                     rx = max(-1.0, min(1.0, rx_raw / 32768.0))
-                    self._prev_rx_raw = rx_raw
 
                 ry = max(-1.0, min(1.0, -(struct.unpack_from("<h", cmd, 23)[0] / 32768.0)))
 

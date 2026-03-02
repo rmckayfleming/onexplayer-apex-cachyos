@@ -1,8 +1,14 @@
-name: Build and Release
+# Disabled while testing — re-enable when ready for releases
+# name: Build and Release
+#
+# on:
+#   push:
+#     branches: [main]
+
+name: Build and Release (disabled)
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   build:
