@@ -90,13 +90,6 @@ APEX_DEVICE_ENTRY = '''    "ONEXPLAYER APEX": {
         "apex_kbd": True,
     },'''
 
-# Placeholder byte values for Apex back paddles in hid_v2.py OXP_BUTTONS.
-# These need to be updated after capturing raw HID reports from the device:
-#   sudo systemctl stop hhd
-#   sudo cat /dev/hidrawN | xxd   (press each paddle, note the byte)
-# On other OXP devices, L4=0x22 and R4=0x23. The Apex sends different values.
-APEX_L4_BYTE = 0x22  # TODO: replace with actual Apex L4 paddle byte
-APEX_R4_BYTE = 0x23  # TODO: replace with actual Apex R4 paddle byte
 
 
 def _find_hhd_files():
@@ -133,13 +126,15 @@ def is_applied():
         with open(base_file) as f:
             base_content = f.read()
         const_ok = "ONEXPLAYER APEX" in const_content and "APEX_BTN_MAPPINGS" in const_content
-        base_ok = "APEX_BTN_MAPPINGS" in base_content
+        base_ok = ("APEX_BTN_MAPPINGS" in base_content
+                   and "apex: bool = False" in base_content
+                   and 'apex=dconf.get("apex_kbd"' in base_content)
         # hid_v2 patch is optional — only check if the file exists
         hid_v2_ok = True
         if hid_v2_file:
             with open(hid_v2_file) as f:
                 hid_v2_content = f.read()
-            hid_v2_ok = "# Apex back paddles" in hid_v2_content
+            hid_v2_ok = "# Apex full intercept" in hid_v2_content
         # "applied" is based on const+base only — these are the core patches.
         # hid_v2 is an additive enhancement; its absence shouldn't flip the
         # toggle to "Not applied" for users who already have the old patch.
@@ -485,26 +480,32 @@ def _patch_const(const_file):
 
 
 def _patch_base(base_file):
-    """Patch base.py to use Apex keyboard VID:PID and button mappings."""
+    """Patch base.py for Apex support.
+
+    Three patch groups:
+    1. Import + keyboard VID:PID patches (use APEX_BTN_MAPPINGS, X1_MINI for kbd)
+    2. find_vendor() patch — use X1_MINI (0x1A86:0xFE00) for OxpHidrawV2 on Apex
+       so that the intercept command and back paddle reports go through the correct
+       vendor HID device instead of the XFLY keyboard device (0x1A2C:0xB001).
+    """
     with open(base_file) as f:
         content = f.read()
 
-    if 'APEX_BTN_MAPPINGS' in content:
-        return
-
     original = content
 
-    # Update import
-    old_import = 'from .const import BTN_MAPPINGS, BTN_MAPPINGS_NONTURBO, DEFAULT_MAPPINGS'
-    new_import = 'from .const import APEX_BTN_MAPPINGS, BTN_MAPPINGS, BTN_MAPPINGS_NONTURBO, DEFAULT_MAPPINGS'
-    if old_import in content:
-        content = content.replace(old_import, new_import)
-        _log_info("Patched import line in base.py")
-    else:
-        _log_warning("Could not find expected import line in base.py — HHD version may differ")
+    # --- Group 1: Import + keyboard patches ---
+    if 'APEX_BTN_MAPPINGS' not in content:
+        # Update import
+        old_import = 'from .const import BTN_MAPPINGS, BTN_MAPPINGS_NONTURBO, DEFAULT_MAPPINGS'
+        new_import = 'from .const import APEX_BTN_MAPPINGS, BTN_MAPPINGS, BTN_MAPPINGS_NONTURBO, DEFAULT_MAPPINGS'
+        if old_import in content:
+            content = content.replace(old_import, new_import)
+            _log_info("Patched import line in base.py")
+        else:
+            _log_warning("Could not find expected import line in base.py — HHD version may differ")
 
-    # Patch turbo_loop keyboard device
-    old_turbo = '''    d_kbd_1 = OxpAtKbd(
+        # Patch turbo_loop keyboard device
+        old_turbo = '''    d_kbd_1 = OxpAtKbd(
         vid=[KBD_VID],
         pid=[KBD_PID],
         required=False,
@@ -515,7 +516,7 @@ def _patch_base(base_file):
     share_reboots = False
     last_controller_check = 0'''
 
-    new_turbo = '''    if dconf.get("apex_kbd", False):
+        new_turbo = '''    if dconf.get("apex_kbd", False):
         d_kbd_1 = OxpAtKbd(
             vid=[X1_MINI_VID],
             pid=[X1_MINI_PID],
@@ -535,14 +536,14 @@ def _patch_base(base_file):
     share_reboots = False
     last_controller_check = 0'''
 
-    if old_turbo in content:
-        content = content.replace(old_turbo, new_turbo)
-        _log_info("Patched turbo_loop keyboard block")
-    else:
-        _log_warning("Could not find turbo_loop keyboard block in base.py — HHD version may differ")
+        if old_turbo in content:
+            content = content.replace(old_turbo, new_turbo)
+            _log_info("Patched turbo_loop keyboard block")
+        else:
+            _log_warning("Could not find turbo_loop keyboard block in base.py — HHD version may differ")
 
-    # Patch controller_loop keyboard device
-    old_ctrl = '''    if turbo:
+        # Patch controller_loop keyboard device
+        old_ctrl = '''    if turbo:
         # Switch buttons if turbo is enabled.
         # This only affects AOKZOE and OneXPlayer devices with
         # that button that have the nonturbo mapping as default
@@ -558,7 +559,7 @@ def _patch_base(base_file):
         btn_map=mappings,
     )'''
 
-    new_ctrl = '''    if turbo:
+        new_ctrl = '''    if turbo:
         # Switch buttons if turbo is enabled.
         # This only affects AOKZOE and OneXPlayer devices with
         # that button that have the nonturbo mapping as default
@@ -583,14 +584,90 @@ def _patch_base(base_file):
             btn_map=mappings,
         )'''
 
-    if old_ctrl in content:
-        content = content.replace(old_ctrl, new_ctrl)
-        _log_info("Patched controller_loop keyboard block")
+        if old_ctrl in content:
+            content = content.replace(old_ctrl, new_ctrl)
+            _log_info("Patched controller_loop keyboard block")
+        else:
+            _log_warning("Could not find controller_loop keyboard block in base.py — HHD version may differ")
+
+    # --- Group 2: find_vendor() — use correct vendor device for Apex ---
+    # The Apex's back paddles and intercept command live on 1A86:FE00 (X1_MINI),
+    # but OxpHidrawV2 defaults to 1A2C:B001 (XFLY keyboard). We add an `apex`
+    # parameter so find_vendor creates OxpHidrawV2 with the right VID/PID.
+    if 'apex: bool = False' not in content:
+        # Patch function signature
+        old_sig = 'def find_vendor(prepare, turbo, protocol: str | None, secondary: bool, vibration: str | None):'
+        new_sig = 'def find_vendor(prepare, turbo, protocol: str | None, secondary: bool, vibration: str | None, apex: bool = False):'
+        if old_sig in content:
+            content = content.replace(old_sig, new_sig)
+            _log_info("Patched find_vendor signature")
+
+        # Patch d_hidraw_v2 creation to use X1_MINI constants for Apex
+        old_v2 = '''    d_hidraw_v2 = OxpHidrawV2(
+        vid=[XFLY_VID],
+        pid=[XFLY_PID],
+        usage_page=[XFLY_PAGE],
+        usage=[XFLY_USAGE],
+        turbo=turbo,
+        required=True,
+    )'''
+
+        new_v2 = '''    if apex:
+        # Apex: vendor HID is 1A86:FE00 (X1_MINI), not 1A2C:B001 (XFLY)
+        d_hidraw_v2 = OxpHidrawV2(
+            vid=[X1_MINI_VID],
+            pid=[X1_MINI_PID],
+            usage_page=[X1_MINI_PAGE],
+            usage=[X1_MINI_USAGE],
+            turbo=turbo,
+            required=True,
+        )
     else:
-        _log_warning("Could not find controller_loop keyboard block in base.py — HHD version may differ")
+        d_hidraw_v2 = OxpHidrawV2(
+            vid=[XFLY_VID],
+            pid=[XFLY_PID],
+            usage_page=[XFLY_PAGE],
+            usage=[XFLY_USAGE],
+            turbo=turbo,
+            required=True,
+        )'''
+
+        if old_v2 in content:
+            content = content.replace(old_v2, new_v2)
+            _log_info("Patched d_hidraw_v2 creation for Apex vendor device")
+
+    # --- Group 2b: find_vendor call sites — add apex= parameter ---
+    # Separate from Group 2 so it works even if the signature was already
+    # patched (e.g. from a partially-patched backup). Uses regex to handle
+    # varying closing-paren indentation.
+    if 'apex=dconf.get("apex_kbd"' not in content:
+        # Match find_vendor( ... vibration=conf.get("vibration_strength", None),\n<whitespace>)
+        # and insert apex= before the closing paren.
+        call_pattern = re.compile(
+            r'(d_vend = find_vendor\(\s*\n'
+            r'\s+prepare,\s*\n'
+            r'\s+(?:True|turbo),\s*\n'
+            r'\s+protocol=dconf\.get\("protocol", None\),\s*\n'
+            r'\s+secondary=dconf\.get\("rgb_secondary", False\),\s*\n'
+            r'\s+vibration=conf\.get\("vibration_strength", None\),\s*\n)'
+            r'(\s+\))',
+        )
+        matches = list(call_pattern.finditer(content))
+        if matches:
+            # Replace from end to start so offsets stay valid
+            for m in reversed(matches):
+                # Determine indentation of the arguments (use vibration line's indent)
+                vib_line = [l for l in m.group(1).split('\n') if 'vibration=' in l][0]
+                arg_indent = vib_line[:len(vib_line) - len(vib_line.lstrip())]
+                apex_line = f'{arg_indent}apex=dconf.get("apex_kbd", False),\n'
+                content = content[:m.end(1)] + apex_line + content[m.start(2):]
+            _log_info(f"Patched {len(matches)} find_vendor call site(s) with apex= parameter")
+        else:
+            _log_warning("Could not find find_vendor call sites to patch")
 
     if content == original:
-        raise RuntimeError("No patches could be applied to base.py — HHD version may be incompatible")
+        _log_info("base.py already fully patched")
+        return
 
     with open(base_file, 'w') as f:
         f.write(content)
@@ -598,76 +675,158 @@ def _patch_base(base_file):
 
 
 def _patch_hid_v2(hid_v2_file):
-    """Patch hid_v2.py to enable back paddle intercept and button mappings.
+    """Patch hid_v2.py for Apex full intercept mode.
 
-    Two changes:
-    1. Add gen_intercept(True) to INITIALIZE so HHD sends the intercept command
-       on device open — this makes the firmware send separate L4/R4 events
-       instead of mirroring B/Y on the Xbox gamepad.
-    2. Ensure OXP_BUTTONS has 0x22/0x23 mapped to extra_l1/extra_r1
-       (already present upstream, but add marker comment for detection).
+    The Apex firmware's intercept command takes over the ENTIRE controller —
+    the Xbox gamepad goes completely silent. So we must handle ALL input
+    (buttons + analog sticks + triggers) from the vendor HID device.
+
+    Changes:
+    1. Add `import struct` for parsing analog axis data.
+    2. Add `_gen_cmd_v1()` helper for v1-format HID commands.
+    3. Replace INITIALIZE with v1-format intercept command.
+    4. Expand OXP_BUTTONS with all 16 standard gamepad button codes.
+    5. Modify produce() to check packet type and parse GAMEPAD_STATE (type 0x02)
+       for analog stick and trigger data.
     """
     with open(hid_v2_file) as f:
         content = f.read()
 
-    if "# Apex back paddles" in content:
-        return  # Already patched
+    if "# Apex full intercept" in content:
+        _log_info("hid_v2.py already has full intercept patch")
+        return
 
     patched = False
 
-    # 1. Enable intercept in INITIALIZE
-    # The file has `gen_intercept(False)` commented out — replace with enabled version.
-    if "gen_intercept(True)" not in content:
-        # Replace the commented-out gen_intercept line with an active one
-        if "# gen_intercept(False)," in content:
-            content = content.replace(
-                "# gen_intercept(False),",
-                "gen_intercept(True),  # Apex: enable separate L4/R4 back paddle events",
-            )
-            _log_info("Enabled gen_intercept(True) in INITIALIZE")
-            patched = True
-        elif "INITIALIZE = [" in content and "gen_intercept" not in content:
-            # No gen_intercept at all — add it to the INITIALIZE list
-            content = content.replace(
-                "INITIALIZE = [",
-                "INITIALIZE = [\n    gen_intercept(True),  # Apex: enable separate L4/R4 back paddle events",
-            )
-            _log_info("Added gen_intercept(True) to INITIALIZE")
-            patched = True
+    # 1. Add `import struct` if not present
+    if "import struct" not in content:
+        content = content.replace(
+            "import logging\n",
+            "import logging\nimport struct\n",
+        )
+        _log_info("Added import struct to hid_v2.py")
 
-    # 2. Add marker comment to OXP_BUTTONS for is_applied() detection
-    oxp_buttons_pattern = r'(OXP_BUTTONS\s*=\s*\{[^}]*)(})'
+    # 2. Add _gen_cmd_v1 helper if not present
+    V1_HELPER = (
+        '\n\ndef _gen_cmd_v1(cid, cmd, idx=0x01, size=64):\n'
+        '    """Generate an HID v1 command (0x3F format with footer)."""\n'
+        '    base = bytes([cid, 0x3F, idx] + cmd)\n'
+        '    padding = bytes([0] * (size - len(base) - 2))\n'
+        '    return base + padding + bytes([0x3F, cid])\n'
+    )
+    if "_gen_cmd_v1" not in content:
+        if "gen_intercept = lambda" in content:
+            content = content.replace(
+                "gen_intercept = lambda enable: gen_cmd(0xB2, [0x03 if enable else 0x00, 0x01, 0x02])",
+                "gen_intercept = lambda enable: gen_cmd(0xB2, [0x03 if enable else 0x00, 0x01, 0x02])"
+                + V1_HELPER,
+            )
+            _log_info("Added _gen_cmd_v1 helper to hid_v2.py")
+
+    # 3. Fix INITIALIZE to use v1 format intercept
+    if "_gen_cmd_v1(0xB2" not in content:
+        for old_init in [
+            "# gen_intercept(False),",
+            "gen_intercept(True),",
+            "gen_intercept(False),",
+        ]:
+            if old_init in content:
+                content = content.replace(
+                    old_init,
+                    "_gen_cmd_v1(0xB2, [0x03, 0x01, 0x02]),  # Apex: v1-format intercept",
+                )
+                _log_info("Fixed INITIALIZE intercept command")
+                break
+        else:
+            if "INITIALIZE = [" in content:
+                content = content.replace(
+                    "INITIALIZE = [",
+                    "INITIALIZE = [\n    _gen_cmd_v1(0xB2, [0x03, 0x01, 0x02]),  # Apex: v1-format intercept",
+                )
+                _log_info("Added v1-format intercept to INITIALIZE")
+
+    # 4. Replace OXP_BUTTONS with full button mapping
+    # Handle both old-patched (with "# Apex back paddles" marker) and unpatched versions
+    NEW_OXP_BUTTONS = (
+        'OXP_BUTTONS = {\n'
+        '    # Apex full intercept — all standard gamepad buttons\n'
+        '    0x01: "a",\n'
+        '    0x02: "b",\n'
+        '    0x03: "x",\n'
+        '    0x04: "y",\n'
+        '    0x05: "lb",\n'
+        '    0x06: "rb",\n'
+        '    0x09: "start",\n'
+        '    0x0a: "select",\n'
+        '    0x0b: "ls",\n'
+        '    0x0c: "rs",\n'
+        '    0x0d: "dpad_up",\n'
+        '    0x0e: "dpad_down",\n'
+        '    0x0f: "dpad_left",\n'
+        '    0x10: "dpad_right",\n'
+        '    0x21: HOME_NAME,\n'
+        '    0x22: "extra_l1",\n'
+        '    0x23: "extra_r1",\n'
+        '    0x24: KBD_NAME,\n'
+        '}'
+    )
+    oxp_buttons_pattern = r'OXP_BUTTONS\s*=\s*\{[^}]*\}'
     match = re.search(oxp_buttons_pattern, content, re.DOTALL)
     if match:
-        existing_block = match.group(1)
-        l4_hex = hex(APEX_L4_BYTE)
-        r4_hex = hex(APEX_R4_BYTE)
-        if l4_hex in existing_block and r4_hex in existing_block:
-            # Byte values already present — just add marker comment
-            content = content.replace(
-                match.group(0),
-                match.group(1) + "    # Apex back paddles\n" + match.group(2),
-            )
-            patched = True
-        else:
-            # Add the byte entries
-            apex_entries = (
-                f'    # Apex back paddles\n'
-                f'    {l4_hex}: "extra_l1",\n'
-                f'    {r4_hex}: "extra_r1",\n'
-            )
-            content = content.replace(
-                match.group(0),
-                match.group(1) + apex_entries + match.group(2),
-            )
-            patched = True
+        content = content[:match.start()] + NEW_OXP_BUTTONS + content[match.end():]
+        _log_info("Replaced OXP_BUTTONS with full Apex button mapping")
+        patched = True
+
+    # 5. Modify produce() to handle packet types and parse GAMEPAD_STATE
+    # Insert packet type handling between "if cid != 0xB2: continue" and "btn = cmd[6]"
+    OLD_PRODUCE = (
+        '            if cid != 0xB2:\n'
+        '                logger.warning(f"OXP HID unknown command: {cmd.hex()}")\n'
+        '                continue\n'
+        '\n'
+        '            btn = cmd[6]'
+    )
+    NEW_PRODUCE = (
+        '            if cid != 0xB2:\n'
+        '                logger.warning(f"OXP HID unknown command: {cmd.hex()}")\n'
+        '                continue\n'
+        '\n'
+        '            pkt_type = cmd[3]\n'
+        '\n'
+        '            # Apex full intercept: parse GAMEPAD_STATE for analog axes\n'
+        '            if pkt_type == 0x02 and len(cmd) >= 25:\n'
+        '                lt_val = cmd[15] / 255.0\n'
+        '                rt_val = cmd[16] / 255.0\n'
+        '                lx = max(-1.0, min(1.0, struct.unpack_from("<h", cmd, 17)[0] / 32767.0))\n'
+        '                ly = max(-1.0, min(1.0, -(struct.unpack_from("<h", cmd, 19)[0] / 32767.0)))\n'
+        '                rx = max(-1.0, min(1.0, struct.unpack_from("<h", cmd, 21)[0] / 32767.0))\n'
+        '                ry = max(-1.0, min(1.0, -(struct.unpack_from("<h", cmd, 23)[0] / 32767.0)))\n'
+        '                evs.append({"type": "axis", "code": "ls_x", "value": lx})\n'
+        '                evs.append({"type": "axis", "code": "ls_y", "value": ly})\n'
+        '                evs.append({"type": "axis", "code": "rs_x", "value": rx})\n'
+        '                evs.append({"type": "axis", "code": "rs_y", "value": ry})\n'
+        '                evs.append({"type": "axis", "code": "lt", "value": lt_val})\n'
+        '                evs.append({"type": "axis", "code": "rt", "value": rt_val})\n'
+        '                continue\n'
+        '\n'
+        '            if pkt_type not in (0x01, 0x00):\n'
+        '                continue\n'
+        '\n'
+        '            btn = cmd[6]'
+    )
+    if OLD_PRODUCE in content:
+        content = content.replace(OLD_PRODUCE, NEW_PRODUCE)
+        _log_info("Patched produce() with GAMEPAD_STATE parsing")
+        patched = True
+    else:
+        _log_warning("Could not find produce() insertion point — structure may differ")
 
     if not patched:
         raise RuntimeError("Could not patch hid_v2.py — file structure unexpected")
 
     with open(hid_v2_file, 'w') as f:
         f.write(content)
-    _log_info("hid_v2.py patched — enabled intercept + back paddle mappings")
+    _log_info("hid_v2.py patched — Apex full intercept (all buttons + analog axes)")
 
 
 if __name__ == "__main__":
