@@ -25,12 +25,20 @@ interface FanStatus {
   error?: string;
 }
 
+interface SpeakerDSPStatus {
+  enabled: boolean;
+  profile?: string | null;
+  speaker_node?: string | null;
+  error?: string;
+}
+
 interface StatusResponse {
   button_fix: { applied: boolean; error?: string; home_monitor_running?: boolean; intercept_enabled?: boolean };
   sleep_fix: {
     has_kargs: boolean;
     kargs_found: string[];
   };
+  speaker_dsp: SpeakerDSPStatus;
   fan: FanStatus;
 }
 
@@ -70,6 +78,9 @@ const setFanSpeed = callable<[number], { success: boolean }>("set_fan_speed");
 const setFanProfile = callable<[string], { success: boolean }>("set_fan_profile");
 const getFanStatus = callable<[], FanStatus>("get_fan_status");
 const setInterceptMode = callable<[boolean], FixResult>("set_intercept_mode");
+const enableSpeakerDSP = callable<[string], FixResult>("enable_speaker_dsp");
+const disableSpeakerDSP = callable<[], FixResult>("disable_speaker_dsp");
+const setDSPProfile = callable<[string], FixResult>("set_dsp_profile");
 const getLogs = callable<[number], { lines: string[]; log_file: string; error?: string }>("get_logs");
 
 const PROFILE_OPTIONS: ProfileOption[] = [
@@ -77,6 +88,12 @@ const PROFILE_OPTIONS: ProfileOption[] = [
   { data: "balanced", label: "Balanced" },
   { data: "performance", label: "Performance" },
   { data: "custom", label: "Custom (slider)" },
+];
+
+const DSP_PROFILE_OPTIONS: ProfileOption[] = [
+  { data: "balanced", label: "Balanced" },
+  { data: "bass_boost", label: "Bass Boost" },
+  { data: "flat", label: "Flat" },
 ];
 
 const FanSpeedSlider: FC<{ speed: number; onCommit: (value: number) => Promise<void> }> = ({
@@ -167,6 +184,7 @@ const Content: FC = () => {
     has_kargs: false,
     kargs_found: [],
   });
+  const [speakerDSP, setSpeakerDSP] = useState<SpeakerDSPStatus>({ enabled: false });
   const [fan, setFan] = useState<FanStatus>({ available: false });
   const [statusLoaded, setStatusLoaded] = useState(false);
   const [loading, setLoading] = useState<LoadingState>({ active: null, message: "" });
@@ -185,6 +203,7 @@ const Content: FC = () => {
       const status = await getStatus();
       setButtonFix(status.button_fix);
       setSleepFix(status.sleep_fix);
+      setSpeakerDSP(status.speaker_dsp);
       setFan(status.fan);
     } catch (e) {
       console.error("Failed to get status:", e);
@@ -292,6 +311,44 @@ const Content: FC = () => {
       }
     } catch (e) {
       showResult("sleep", `Error: ${e}`, "error");
+    } finally {
+      setLoading({ active: null, message: "" });
+      refresh();
+    }
+  };
+
+  const handleSpeakerDSP = async (enabled: boolean) => {
+    setLoading({ active: "dsp", message: enabled ? "Enabling speaker DSP..." : "Disabling speaker DSP..." });
+    try {
+      const res = enabled
+        ? await enableSpeakerDSP(speakerDSP.profile || "balanced")
+        : await disableSpeakerDSP();
+      if (res.success) {
+        setSpeakerDSP((prev) => ({ ...prev, enabled }));
+        showResult("dsp", res.message || (enabled ? "Enabled" : "Disabled"), "success");
+      } else {
+        showResult("dsp", res.error || "Failed", "error");
+      }
+    } catch (e) {
+      showResult("dsp", `Error: ${e}`, "error");
+    } finally {
+      setLoading({ active: null, message: "" });
+      refresh();
+    }
+  };
+
+  const handleDSPProfile = async (profile: string) => {
+    setLoading({ active: "dsp", message: "Switching EQ profile..." });
+    try {
+      const res = await setDSPProfile(profile);
+      if (res.success) {
+        setSpeakerDSP((prev) => ({ ...prev, profile }));
+        showResult("dsp", res.message || `Switched to ${profile}`, "success");
+      } else {
+        showResult("dsp", res.error || "Failed", "error");
+      }
+    } catch (e) {
+      showResult("dsp", `Error: ${e}`, "error");
     } finally {
       setLoading({ active: null, message: "" });
       refresh();
@@ -456,6 +513,52 @@ const Content: FC = () => {
             )}
           </>
         )}
+      </PanelSection>
+
+      {/* Speaker DSP Section */}
+      <PanelSection title="Speaker DSP">
+        <PanelSectionRow>
+          <ToggleField
+            label="Speaker Enhancement"
+            description={
+              speakerDSP.enabled
+                ? `Enhanced — ${speakerDSP.profile || "balanced"} profile`
+                : "Off — raw speaker output"
+            }
+            checked={speakerDSP.enabled}
+            disabled={loading.active === "dsp"}
+            onChange={handleSpeakerDSP}
+          />
+        </PanelSectionRow>
+        <InlineStatus loading={loading} result={result} section="dsp" />
+        {speakerDSP.enabled && (
+          <PanelSectionRow>
+            <DropdownItem
+              label="EQ Profile"
+              rgOptions={DSP_PROFILE_OPTIONS.map((o) => ({
+                data: o.data,
+                label: o.label,
+              }))}
+              selectedOption={speakerDSP.profile || "balanced"}
+              onChange={(option: ProfileOption) => handleDSPProfile(option.data)}
+            />
+          </PanelSectionRow>
+        )}
+        <PanelSectionRow>
+          <div
+            style={{
+              backgroundColor: "#1a2a3a",
+              border: "1px solid #2a4a6a",
+              borderRadius: "4px",
+              padding: "8px 12px",
+              fontSize: "11px",
+              lineHeight: "1.4",
+              color: "#88bbdd",
+            }}
+          >
+            Applies EQ to internal speakers only. Headphones and external audio are not affected.
+          </div>
+        </PanelSectionRow>
       </PanelSection>
 
       {/* Fan Control Section */}

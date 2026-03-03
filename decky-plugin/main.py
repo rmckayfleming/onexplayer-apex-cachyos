@@ -60,6 +60,24 @@ except Exception as e:
     sleep_fix_status = None
 
 try:
+    import speaker_dsp as _speaker_dsp_mod
+    from speaker_dsp import (
+        enable as enable_speaker_dsp_impl,
+        disable as disable_speaker_dsp_impl,
+        set_profile as set_dsp_profile_impl,
+        get_status as speaker_dsp_status,
+        list_profiles as list_dsp_profiles_impl,
+    )
+except Exception as e:
+    decky.logger.error(f"Failed to import speaker_dsp: {e}")
+    _speaker_dsp_mod = None
+    enable_speaker_dsp_impl = None
+    disable_speaker_dsp_impl = None
+    set_dsp_profile_impl = None
+    speaker_dsp_status = None
+    list_dsp_profiles_impl = None
+
+try:
     import home_button as _home_button_mod
     from home_button import HomeButtonMonitor
 except Exception as e:
@@ -142,6 +160,8 @@ if _button_fix_mod:
     _button_fix_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 if _home_button_mod:
     _home_button_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
+if _speaker_dsp_mod:
+    _speaker_dsp_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 
 
 class Plugin:
@@ -230,6 +250,7 @@ class Plugin:
         return {
             "button_fix": bf_status,
             "sleep_fix": sleep_fix_status() if sleep_fix_status else {"has_kargs": False, "kargs_found": []},
+            "speaker_dsp": speaker_dsp_status() if speaker_dsp_status else {"enabled": False, "profile": None, "speaker_node": None},
             "fan": fan_status,
         }
 
@@ -352,6 +373,65 @@ class Plugin:
         except Exception as e:
             _log_error(f"Sleep fix removal exception: {e}")
             return {"success": False, "error": str(e)}
+
+    # -- Speaker DSP --
+    # PipeWire parametric EQ for internal speakers.
+    # Writes filter-chain config to user's pipewire.conf.d directory.
+
+    async def get_speaker_dsp_status(self):
+        if not speaker_dsp_status:
+            return {"enabled": False, "profile": None, "speaker_node": None}
+        return speaker_dsp_status()
+
+    async def enable_speaker_dsp(self, profile="balanced"):
+        if not enable_speaker_dsp_impl:
+            return {"success": False, "error": "speaker_dsp module not loaded"}
+        _log_info(f"Enabling speaker DSP ({profile})...")
+        try:
+            result = await asyncio.to_thread(enable_speaker_dsp_impl, profile)
+            if result.get("success"):
+                _log_info(f"Speaker DSP enabled: {result.get('message', 'OK')}")
+            else:
+                _log_error(f"Speaker DSP enable failed: {result.get('error', 'unknown')}")
+            return result
+        except Exception as e:
+            _log_error(f"Speaker DSP enable exception: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def disable_speaker_dsp(self):
+        if not disable_speaker_dsp_impl:
+            return {"success": False, "error": "speaker_dsp module not loaded"}
+        _log_info("Disabling speaker DSP...")
+        try:
+            result = await asyncio.to_thread(disable_speaker_dsp_impl)
+            if result.get("success"):
+                _log_info(f"Speaker DSP disabled: {result.get('message', 'OK')}")
+            else:
+                _log_error(f"Speaker DSP disable failed: {result.get('error', 'unknown')}")
+            return result
+        except Exception as e:
+            _log_error(f"Speaker DSP disable exception: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def set_dsp_profile(self, profile):
+        if not set_dsp_profile_impl:
+            return {"success": False, "error": "speaker_dsp module not loaded"}
+        _log_info(f"Switching speaker DSP profile to {profile}...")
+        try:
+            result = await asyncio.to_thread(set_dsp_profile_impl, profile)
+            if result.get("success"):
+                _log_info(f"Speaker DSP profile set: {result.get('message', 'OK')}")
+            else:
+                _log_error(f"Speaker DSP profile switch failed: {result.get('error', 'unknown')}")
+            return result
+        except Exception as e:
+            _log_error(f"Speaker DSP profile exception: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def list_dsp_profiles(self):
+        if not list_dsp_profiles_impl:
+            return {}
+        return list_dsp_profiles_impl()
 
     # -- Home Button Monitor (private — managed by button fix lifecycle) --
 
