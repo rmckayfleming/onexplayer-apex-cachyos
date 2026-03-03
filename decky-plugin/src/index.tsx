@@ -89,6 +89,9 @@ const saveCustomProfile = callable<[string, Record<string, number>], FixResult>(
 const deleteCustomProfile = callable<[string], FixResult>("delete_custom_profile");
 const playTestSound = callable<[], { success: boolean; playing?: boolean; error?: string }>("play_test_sound");
 const stopTestSound = callable<[], { success: boolean; playing?: boolean; error?: string }>("stop_test_sound");
+const bypassSpeakerDSP = callable<[], { success: boolean; bypassed?: boolean; error?: string }>("bypass_speaker_dsp");
+const unbypassSpeakerDSP = callable<[], { success: boolean; bypassed?: boolean; error?: string }>("unbypass_speaker_dsp");
+const isBypassedSpeakerDSP = callable<[], { bypassed: boolean; error?: string }>("is_bypassed_speaker_dsp");
 
 interface EQBand {
   label: string;
@@ -238,6 +241,7 @@ const SpeakerDSPSection: FC<{
   const [customProfiles, setCustomProfiles] = useState<Record<string, Record<string, number>>>({});
   const [bandGains, setBandGains] = useState<Record<string, number>>({});
   const [testPlaying, setTestPlaying] = useState(false);
+  const [bypassed, setBypassed] = useState(false);
   const [namingMode, setNamingMode] = useState(false);
   const [newName, setNewName] = useState("");
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -246,9 +250,12 @@ const SpeakerDSPSection: FC<{
   const isPreset = PRESET_NAMES.includes(dspStatus.profile || "");
   const isCustom = !isPreset && dspStatus.profile != null && dspStatus.profile !== "";
 
-  // Load custom profiles on mount
+  // Load custom profiles and bypass status on mount
   useEffect(() => {
     getCustomProfiles().then((res) => setCustomProfiles(res.profiles || {})).catch(() => {});
+    if (dspStatus.enabled) {
+      isBypassedSpeakerDSP().then((res) => setBypassed(res.bypassed)).catch(() => {});
+    }
   }, []);
 
   // Load band values when profile changes
@@ -404,6 +411,19 @@ const SpeakerDSPSection: FC<{
     }
   };
 
+  const handleBypass = async (on: boolean) => {
+    try {
+      const res = on ? await bypassSpeakerDSP() : await unbypassSpeakerDSP();
+      if (res.success) {
+        setBypassed(on);
+      } else {
+        showResult("dsp", res.error || "Failed to toggle bypass", "error");
+      }
+    } catch (e) {
+      showResult("dsp", `Error: ${e}`, "error");
+    }
+  };
+
   // Build dropdown options: presets + custom profiles + "New Custom..."
   const profileOptions: ProfileOption[] = [
     { data: "balanced", label: "Balanced" },
@@ -493,15 +513,33 @@ const SpeakerDSPSection: FC<{
             </>
           )}
 
+          {/* A/B Bypass Toggle */}
+          <PanelSectionRow>
+            <ToggleField
+              label="Bypass EQ"
+              description={bypassed ? "Bypassed — raw speaker output" : "EQ active"}
+              checked={bypassed}
+              onChange={handleBypass}
+            />
+          </PanelSectionRow>
+
           {/* Test Sound */}
           <PanelSectionRow>
             <ToggleField
               label="Test Sound"
-              description={testPlaying ? "Playing — toggle off to stop" : "Play a test tone to preview EQ"}
+              description={testPlaying ? "Playing — toggle off to stop" : "Play music to preview EQ"}
               checked={testPlaying}
               onChange={handleTestSound}
             />
           </PanelSectionRow>
+          {testPlaying && (
+            <PanelSectionRow>
+              <div style={{ fontSize: "10px", color: "#666", lineHeight: "1.3", padding: "0 0 4px 0" }}>
+                Song: Extra Terra, Max Brhon - Cyberblade [NCS Release]
+                {" · "}Music provided by NoCopyrightSounds
+              </div>
+            </PanelSectionRow>
+          )}
         </>
       )}
 

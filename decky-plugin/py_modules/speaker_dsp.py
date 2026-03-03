@@ -685,6 +685,134 @@ def delete_custom_profile(name):
     return {"success": True, "message": f"Deleted profile: {name}"}
 
 
+def _run_wpctl(args, uid, username):
+    """Run a wpctl command as the real user and return stdout."""
+    env = _clean_env()
+    env["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
+    r = subprocess.run(
+        ["runuser", "-u", username, "--", "wpctl"] + args,
+        capture_output=True, text=True, timeout=10,
+        env=env,
+    )
+    return r
+
+
+def _find_node_id(node_name, uid, username):
+    """Find the PipeWire node ID for a given sink name via wpctl status.
+
+    Parses wpctl status output to find the node ID matching the given name.
+    Returns the node ID as a string, or None if not found.
+    """
+    r = _run_wpctl(["status"], uid, username)
+    if r.returncode != 0:
+        _log_warning(f"wpctl status failed: {r.stderr.strip()}")
+        return None
+
+    for line in r.stdout.splitlines():
+        if node_name in line:
+            # Lines look like: " *  47. OXP Apex Speaker EQ [vol: 1.00]"
+            # or:               "    52. alsa_output.pci-... [vol: 0.40]"
+            stripped = line.strip().lstrip("*").strip()
+            parts = stripped.split(".", 1)
+            if len(parts) >= 2:
+                node_id = parts[0].strip()
+                if node_id.isdigit():
+                    return node_id
+    return None
+
+
+def bypass():
+    """Bypass the EQ by switching default sink to the physical speaker.
+
+    Instant — no config rewrite, no PipeWire restart.
+    """
+    username, _, uid = _get_user_info()
+    speaker_node = _find_speaker_node()
+    node_id = _find_node_id(speaker_node, uid, username)
+    if not node_id:
+        return {"success": False, "error": f"Cannot find physical speaker node: {speaker_node}"}
+
+    r = _run_wpctl(["set-default", node_id], uid, username)
+    if r.returncode != 0:
+        return {"success": False, "error": f"wpctl set-default failed: {r.stderr.strip()}"}
+
+    _log_info(f"EQ bypassed — default sink set to physical speaker (node {node_id})")
+    return {"success": True, "bypassed": True}
+
+
+def unbypass():
+    """Restore the EQ by switching default sink back to the virtual EQ sink.
+
+    Instant — no config rewrite, no PipeWire restart.
+    """
+    username, _, uid = _get_user_info()
+    node_id = _find_node_id("OXP Apex Speaker EQ", uid, username)
+    if not node_id:
+        return {"success": False, "error": "Cannot find EQ sink — is speaker DSP enabled?"}
+
+    r = _run_wpctl(["set-default", node_id], uid, username)
+    if r.returncode != 0:
+        return {"success": False, "error": f"wpctl set-default failed: {r.stderr.strip()}"}
+
+    _log_info(f"EQ unbypass — default sink set to EQ (node {node_id})")
+    return {"success": True, "bypassed": False}
+
+
+def is_bypassed():
+    """Check if the EQ is currently bypassed (physical speaker is default sink).
+
+    Returns: {"bypassed": bool}
+    """
+    username, _, uid = _get_user_info()
+    r = _run_wpctl(["status"], uid, username)
+    if r.returncode != 0:
+        return {"bypassed": False, "error": f"wpctl status failed: {r.stderr.strip()}"}
+
+    # Look for the default sink (marked with * ) in the Audio Sinks section
+    in_sinks = False
+    for line in r.stdout.splitlines():
+        if "Sinks:" in line:
+            in_sinks = True
+            continue
+        if in_sinks:
+            # End of sinks section
+            if line.strip() and not line.startswith(" "):
+                break
+            if "*" in line and "OXP Apex Speaker EQ" in line:
+                return {"bypassed": False}
+            if "*" in line:
+                # Default sink is something else (physical speaker or other)
+                return {"bypassed": True}
+
+    # If we couldn't determine, assume not bypassed
+    return {"bypassed": False}
+
+
+def _get_test_sound_path():
+    """Get the path to the bundled test sound, falling back to system sound."""
+    # Try bundled NCS track first
+    try:
+        import decky
+        bundled = os.path.join(decky.DECKY_PLUGIN_DIR, "assets", "ncs-cyberblade.ogg")
+        if os.path.exists(bundled):
+            return bundled
+    except ImportError:
+        pass
+
+    # Fallback: check relative to this file (dev/testing)
+    here = os.path.dirname(os.path.abspath(__file__))
+    bundled_dev = os.path.join(here, "..", "assets", "ncs-cyberblade.ogg")
+    if os.path.exists(bundled_dev):
+        return bundled_dev
+
+    # Final fallback: system test tone
+    system_sound = "/usr/share/sounds/freedesktop/stereo/audio-test-signal.oga"
+    if os.path.exists(system_sound):
+        return system_sound
+
+    return None
+
+
 def play_test_sound():
     """Start looping a test sound via pw-play for EQ preview."""
     global _test_sound_proc
@@ -694,9 +822,9 @@ def play_test_sound():
     env = _clean_env()
     env["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
 
-    sound_file = "/usr/share/sounds/freedesktop/stereo/audio-test-signal.oga"
-    if not os.path.exists(sound_file):
-        return {"success": False, "error": f"Test sound not found: {sound_file}"}
+    sound_file = _get_test_sound_path()
+    if not sound_file:
+        return {"success": False, "error": "No test sound file found"}
 
     # Loop by running pw-play in a bash while loop
     try:

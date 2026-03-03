@@ -73,6 +73,9 @@ try:
         delete_custom_profile as delete_custom_profile_impl,
         play_test_sound as play_test_sound_impl,
         stop_test_sound as stop_test_sound_impl,
+        bypass as bypass_speaker_dsp_impl,
+        unbypass as unbypass_speaker_dsp_impl,
+        is_bypassed as is_bypassed_speaker_dsp_impl,
     )
 except Exception as e:
     decky.logger.error(f"Failed to import speaker_dsp: {e}")
@@ -88,6 +91,9 @@ except Exception as e:
     delete_custom_profile_impl = None
     play_test_sound_impl = None
     stop_test_sound_impl = None
+    bypass_speaker_dsp_impl = None
+    unbypass_speaker_dsp_impl = None
+    is_bypassed_speaker_dsp_impl = None
 
 try:
     import home_button as _home_button_mod
@@ -500,6 +506,33 @@ class Plugin:
         except Exception as e:
             _log_error(f"Stop test sound exception: {e}")
             return {"success": False, "error": str(e)}
+
+    async def bypass_speaker_dsp(self):
+        if not bypass_speaker_dsp_impl:
+            return {"success": False, "error": "speaker_dsp module not loaded"}
+        try:
+            return await asyncio.to_thread(bypass_speaker_dsp_impl)
+        except Exception as e:
+            _log_error(f"Bypass speaker DSP exception: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def unbypass_speaker_dsp(self):
+        if not unbypass_speaker_dsp_impl:
+            return {"success": False, "error": "speaker_dsp module not loaded"}
+        try:
+            return await asyncio.to_thread(unbypass_speaker_dsp_impl)
+        except Exception as e:
+            _log_error(f"Unbypass speaker DSP exception: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def is_bypassed_speaker_dsp(self):
+        if not is_bypassed_speaker_dsp_impl:
+            return {"bypassed": False, "error": "speaker_dsp module not loaded"}
+        try:
+            return await asyncio.to_thread(is_bypassed_speaker_dsp_impl)
+        except Exception as e:
+            _log_error(f"Is bypassed speaker DSP exception: {e}")
+            return {"bypassed": False, "error": str(e)}
 
     # -- Home Button Monitor (private — managed by button fix lifecycle) --
 
