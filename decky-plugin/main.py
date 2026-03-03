@@ -67,6 +67,12 @@ try:
         set_profile as set_dsp_profile_impl,
         get_status as speaker_dsp_status,
         list_profiles as list_dsp_profiles_impl,
+        get_preset_bands as get_preset_bands_impl,
+        get_custom_profiles as get_custom_profiles_impl,
+        save_custom_profile as save_custom_profile_impl,
+        delete_custom_profile as delete_custom_profile_impl,
+        play_test_sound as play_test_sound_impl,
+        stop_test_sound as stop_test_sound_impl,
     )
 except Exception as e:
     decky.logger.error(f"Failed to import speaker_dsp: {e}")
@@ -76,6 +82,12 @@ except Exception as e:
     set_dsp_profile_impl = None
     speaker_dsp_status = None
     list_dsp_profiles_impl = None
+    get_preset_bands_impl = None
+    get_custom_profiles_impl = None
+    save_custom_profile_impl = None
+    delete_custom_profile_impl = None
+    play_test_sound_impl = None
+    stop_test_sound_impl = None
 
 try:
     import home_button as _home_button_mod
@@ -225,6 +237,12 @@ class Plugin:
     async def _unload(self):
         """Plugin teardown — called by Decky on unload."""
         _log_info("OneXPlayer Apex Tools unloading")
+        # Stop test sound if playing
+        if stop_test_sound_impl:
+            try:
+                stop_test_sound_impl()
+            except Exception:
+                pass
         # Stop monitors if active
         if self.home_monitor:
             await self.home_monitor.stop()
@@ -432,6 +450,56 @@ class Plugin:
         if not list_dsp_profiles_impl:
             return {}
         return list_dsp_profiles_impl()
+
+    async def get_preset_bands(self, profile_name):
+        if not get_preset_bands_impl:
+            return {"error": "speaker_dsp module not loaded"}
+        return get_preset_bands_impl(profile_name)
+
+    async def get_custom_profiles(self):
+        if not get_custom_profiles_impl:
+            return {"profiles": {}}
+        return get_custom_profiles_impl()
+
+    async def save_custom_profile(self, name, gains):
+        if not save_custom_profile_impl:
+            return {"success": False, "error": "speaker_dsp module not loaded"}
+        _log_info(f"Saving custom EQ profile: {name}")
+        try:
+            result = await asyncio.to_thread(save_custom_profile_impl, name, gains)
+            return result
+        except Exception as e:
+            _log_error(f"Save custom profile exception: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def delete_custom_profile(self, name):
+        if not delete_custom_profile_impl:
+            return {"success": False, "error": "speaker_dsp module not loaded"}
+        _log_info(f"Deleting custom EQ profile: {name}")
+        try:
+            result = await asyncio.to_thread(delete_custom_profile_impl, name)
+            return result
+        except Exception as e:
+            _log_error(f"Delete custom profile exception: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def play_test_sound(self):
+        if not play_test_sound_impl:
+            return {"success": False, "error": "speaker_dsp module not loaded"}
+        try:
+            return await asyncio.to_thread(play_test_sound_impl)
+        except Exception as e:
+            _log_error(f"Play test sound exception: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def stop_test_sound(self):
+        if not stop_test_sound_impl:
+            return {"success": False, "error": "speaker_dsp module not loaded"}
+        try:
+            return await asyncio.to_thread(stop_test_sound_impl)
+        except Exception as e:
+            _log_error(f"Stop test sound exception: {e}")
+            return {"success": False, "error": str(e)}
 
     # -- Home Button Monitor (private — managed by button fix lifecycle) --
 
