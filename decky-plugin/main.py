@@ -53,10 +53,10 @@ except Exception as e:
     set_intercept_mode_impl = None
 
 try:
-    from sleep_fix import apply as apply_sleep_fix_impl, get_status as sleep_fix_status
+    from sleep_fix import remove as remove_sleep_fix_impl, get_status as sleep_fix_status
 except Exception as e:
     decky.logger.error(f"Failed to import sleep_fix: {e}")
-    apply_sleep_fix_impl = None
+    remove_sleep_fix_impl = None
     sleep_fix_status = None
 
 try:
@@ -229,7 +229,7 @@ class Plugin:
             bf_status["intercept_enabled"] = get_intercept_mode_impl().get("enabled", True)
         return {
             "button_fix": bf_status,
-            "sleep_fix": sleep_fix_status() if sleep_fix_status else {"applied": False},
+            "sleep_fix": sleep_fix_status() if sleep_fix_status else {"has_kargs": False, "kargs_found": []},
             "fan": fan_status,
         }
 
@@ -330,27 +330,27 @@ class Plugin:
             return {"success": False, "error": str(e)}
 
     # -- Sleep Fix --
-    # Adds amd_iommu=off kernel param via rpm-ostree to fix suspend/resume.
-    # Creates a new ostree deployment — button fix patches need re-applying after reboot.
+    # S0i3 deep sleep doesn't work on Strix Halo with kernel 6.17 (needs 6.18+).
+    # This only provides cleanup of previously applied (broken) kargs.
 
     async def get_sleep_fix_status(self):
         if not sleep_fix_status:
-            return {"applied": False}
+            return {"has_kargs": False, "kargs_found": []}
         return sleep_fix_status()
 
-    async def apply_sleep_fix(self):
-        if not apply_sleep_fix_impl:
+    async def remove_sleep_fix(self):
+        if not remove_sleep_fix_impl:
             return {"success": False, "error": "sleep_fix module not loaded"}
-        _log_info("Applying sleep fix (amd_iommu=off)...")
+        _log_info("Removing sleep fix kargs and udev rules...")
         try:
-            result = await asyncio.to_thread(apply_sleep_fix_impl)
+            result = await asyncio.to_thread(remove_sleep_fix_impl)
             if result.get("success"):
-                _log_info(f"Sleep fix result: {result.get('message', 'OK')}")
+                _log_info(f"Sleep fix removal: {result.get('message', 'OK')}")
             else:
-                _log_error(f"Sleep fix failed: {result.get('error', 'unknown')}")
+                _log_error(f"Sleep fix removal failed: {result.get('error', 'unknown')}")
             return result
         except Exception as e:
-            _log_error(f"Sleep fix exception: {e}")
+            _log_error(f"Sleep fix removal exception: {e}")
             return {"success": False, "error": str(e)}
 
     # -- Home Button Monitor (private — managed by button fix lifecycle) --

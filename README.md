@@ -11,7 +11,7 @@ These fixes address hardware support gaps that exist because the Apex is too new
 | Problem | Cause | Fix |
 |---------|-------|-----|
 | **Face buttons don't work** | HHD doesn't recognize the Apex — no device profile exists, so it grabs input but doesn't forward events | Patches HHD's `const.py` and `base.py` to add the Apex as a known device with correct button mappings (KEY_G for Home instead of KEY_D) and keyboard VID:PID (1a86:fe00) |
-| **Sleep/suspend crashes or freezes** | IOMMU conflicts on Strix Halo platform | Applies `amd_iommu=off` kernel parameter via `rpm-ostree kargs` |
+| **Sleep/suspend crashes or freezes** | S0i3 deep sleep requires ACPI C4 support missing in kernel 6.17 | **No fix available** — awaiting kernel 6.18+. Plugin provides cleanup of previously applied (broken) kargs. See [sleep research](docs/sleep-research.md) |
 | **Home/Orange button does nothing** | Button sends a non-standard HID modifier combo (LCtrl+LAlt+LGUI) that nothing listens for | Monitors the hidraw device and launches HHD UI on button press |
 | **No fan control** | The `oxpec` kernel driver patch for the Apex isn't in Bazzite's kernel yet | Provides fan control via three fallback backends: hwmon sysfs, EC debugfs (`ec_sys`), or raw port I/O (`/dev/port`) |
 
@@ -25,7 +25,7 @@ These fixes address hardware support gaps that exist because the Apex is too new
 │   ├── src/index.tsx           # React frontend for the QAM sidebar
 │   ├── py_modules/
 │   │   ├── button_fix.py      # HHD patching with backup/restore
-│   │   ├── sleep_fix.py       # Kernel params + udev rules
+│   │   ├── sleep_fix.py       # Sleep fix cleanup (remove broken kargs)
 │   │   ├── fan_control.py     # Fan control (hwmon / EC / port I/O)
 │   │   └── home_button.py     # Async hidraw monitor for Home button
 │   ├── package.json
@@ -33,13 +33,14 @@ These fixes address hardware support gaps that exist because the Apex is too new
 │   └── tsconfig.json
 ├── scripts/                   # Standalone CLI tools (run manually via sudo)
 │   ├── fix-buttons.sh         # Shell script version of the button fix
-│   ├── fix-sleep.sh           # Sleep fix (amd_iommu=off kernel param)
+│   ├── fix-sleep.sh           # Sleep fix cleanup (remove all broken kargs)
 │   ├── oxp-fan-ctl            # Python CLI for fan control
 │   ├── home-button-hhd.py     # Standalone Home button monitor
 │   └── setup-home-button.sh   # Installs Home button monitor as systemd service
 ├── docs/
 │   ├── onexplayer-apex-bazzite-guide.md    # Complete troubleshooting guide
-│   └── onexplayer-apex-fan-control-plan.md # Fan control implementation plan
+│   ├── onexplayer-apex-fan-control-plan.md # Fan control implementation plan
+│   └── sleep-research.md                  # S0i3/s2idle sleep research & findings
 └── research/
     └── linux-gaming-os-onexfly-apex.md     # Linux gaming OS comparison for this device
 ```
@@ -53,7 +54,7 @@ There are two ways to use these fixes:
 The Decky Loader plugin provides a UI in the SteamOS Quick Access Menu (QAM) sidebar. Toggle fixes on/off, control fan speed with a slider, and select fan profiles — all without leaving Game Mode.
 
 - **Button Fix**: Toggle on to patch HHD, toggle off to restore original files from backup
-- **Sleep Fix**: Toggle on to apply kernel params and udev rules (may require reboot)
+- **Sleep Fix**: Cleanup tool — removes previously applied (broken) sleep fix kargs
 - **Home Button**: Toggle on/off to start/stop the hidraw monitor
 - **Fan Control**: Switch between auto and manual mode, pick profiles (Silent/Balanced/Performance), or set a custom speed
 
@@ -65,7 +66,7 @@ For users who prefer the terminal or aren't using Decky:
 # Fix face buttons
 sudo bash scripts/fix-buttons.sh
 
-# Fix sleep/suspend
+# Remove broken sleep fix kargs
 sudo bash scripts/fix-sleep.sh
 
 # Fan control CLI
@@ -123,9 +124,11 @@ Make sure [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) is i
 
 ## Important Notes
 
-- **Sleep fix works.** Adds `amd_iommu=off` kernel parameter. Requires a reboot. Note: applying the sleep fix via `rpm-ostree kargs` creates a new ostree deployment, which wipes any `ostree admin unlock --hotfix` overlay — you'll need to re-apply the button fix after rebooting.
+- **Sleep fix not available.** S0i3 deep sleep on Strix Halo requires kernel 6.18+ (ACPI C4 support). No kernel parameter workaround exists. The plugin provides a cleanup tool to remove previously applied (broken) kargs. See [sleep research](docs/sleep-research.md) for full details.
 
-- **Temporary fixes.** The button fix patches files in `/usr/lib/` which get overwritten on every Bazzite update or `rpm-ostree` operation. You'll need to re-apply after updates. The sleep fix kernel params persist across updates.
+- **fw-fanctrl-suspend (known Bazzite issue).** The `fw-fanctrl` package (Framework Laptop tool) ships a sleep hook that fails on non-Framework hardware, keeping fans running during sleep. See [sleep research](docs/sleep-research.md#fw-fanctrl-suspend-issue) for how to neutralize it.
+
+- **Temporary fixes.** The button fix patches files in `/usr/lib/` which get overwritten on every Bazzite update or `rpm-ostree` operation. You'll need to re-apply after updates.
 
 - **Requires root.** The Decky plugin runs with the `root` flag. The standalone scripts require `sudo`.
 
