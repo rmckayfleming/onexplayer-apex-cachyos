@@ -48,23 +48,25 @@ Installs a background service that recovers the gamepad after sleep by rebinding
 ### Light Sleep
 Applies kernel parameters for s2idle light sleep. **Requires "ACPI Auto configuration" enabled in BIOS.**
 
-- Applies `mem_sleep_default=s2idle`
-- Automatically removes known-problematic legacy kargs (`amd_iommu=off`, etc.)
+- Applies `mem_sleep_default=s2idle` and `amd_iommu=off`
+- Automatically removes known-problematic legacy kargs from previous fix attempts
 - Requires reboot after applying (button fix must be re-applied after reboot)
 
 > **Note:** S0i3 deep sleep is still broken on Strix Halo with kernel 6.17 (requires ACPI C4 in kernel 6.18+). This is *light sleep* (s2idle) which provides lower power draw than staying awake but not as deep as S0i3.
 
-#### Current working kargs
+#### Required kargs
 
 ```
 mem_sleep_default=s2idle
+amd_iommu=off
 ```
+
+`amd_iommu=off` is required for s2idle to work on this hardware — while it blocks the S0i3 path, s2idle will not enter correctly without it on Strix Halo.
 
 #### Known problematic kargs (auto-removed)
 
 | Karg | Issue |
 |------|-------|
-| `amd_iommu=off` | Blocks S0i3 path entirely |
 | `amd_iommu=on` | Invalid AMD parameter, silently ignored |
 | `acpi.ec_no_wakeup=1` | Prevents EC-based wakeup |
 | `amdgpu.cwsr_enable=0` | Compute-specific, not needed |

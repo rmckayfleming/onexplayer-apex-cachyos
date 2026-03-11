@@ -12,7 +12,7 @@ Research conducted 2026-03-02 for OneXPlayer Apex running Bazzite (kernel 6.17.7
 
 ### Working configuration (2026-03-11)
 - **BIOS**: "ACPI Auto configuration" = Enabled
-- **Kargs**: `mem_sleep_default=s2idle`
+- **Kargs**: `mem_sleep_default=s2idle amd_iommu=off`
 - **Kernel**: 6.17.7-ba25.fc43.x86_64
 - **Sleep mode**: s2idle (light sleep)
 
@@ -28,7 +28,8 @@ After sleep, the Apex:
 
 ### Test 1: `amd_iommu=off` (main branch)
 - **Result**: Prevented IOMMU initialization entirely, blocked S0i3 path
-- IOMMU is required for S0i3 — disabling it was counterproductive
+- IOMMU is required for S0i3 — disabling it blocks deep sleep
+- However, `amd_iommu=off` was later found to be **required for s2idle** on Strix Halo — s2idle fails without it
 
 ### Test 2: `amd_iommu=on` + `iommu=pt` (early test/sleep branch)
 - `amd_iommu=on` is **invalid** for AMD — silently ignored (`AMD-Vi: Unknown option - 'on'`)
@@ -169,9 +170,9 @@ echo 'w /sys/power/pm_print_times - - - - 1' | sudo tee -a /etc/tmpfiles.d/pm-de
 
 ### Active (light sleep — working)
 - `mem_sleep_default=s2idle` — explicitly sets s2idle as default sleep mode
+- `amd_iommu=off` — required for s2idle on Strix Halo (blocks S0i3 but s2idle won't work without it)
 
 ### Problematic (auto-removed by plugin)
-- `amd_iommu=off` — prevented IOMMU initialization, blocked S0i3 entirely
 - `amd_iommu=on` — invalid AMD parameter, silently ignored
 - `acpi.ec_no_wakeup=1` — suppress EC wakeup events
 - `amdgpu.cwsr_enable=0` — compute-specific, not needed for sleep
@@ -181,9 +182,9 @@ echo 'w /sys/power/pm_print_times - - - - 1' | sudo tee -a /etc/tmpfiles.d/pm-de
 ### Removed (previously tried, not needed)
 - `iommu=pt` — IOMMU passthrough, not needed for s2idle
 
-### Potential additions when kernel 6.18+ is available
-- `amd_iommu=fullflush` — reported to fix suspend on Ryzen AI 300 (Framework)
-- `iommu=pt` — may still be needed for S0i3
+### Potential changes when kernel 6.18+ is available
+- Remove `amd_iommu=off` — S0i3 requires IOMMU enabled; may need to swap for `amd_iommu=fullflush` (reported to fix suspend on Ryzen AI 300 Framework)
+- `iommu=pt` — may be needed for S0i3
 
 ## Diagnostic Tools
 
