@@ -2,10 +2,9 @@ import { useState, useEffect, useCallback, FC } from "react";
 import { PanelSection, PanelSectionRow, staticClasses } from "@decky/ui";
 import { definePlugin } from "@decky/api";
 import { BUILD_ID } from "./build_info";
-import type { FanStatus, SpeakerDSPStatus, LoadingState, ResultMessage } from "./types";
+import type { SpeakerDSPStatus, OxpecStatus, ResumeFixStatus, SleepEnableStatus, LightSleepStatus, LoadingState, ResultMessage } from "./types";
 import { getStatus } from "./rpc";
 import { SpeakerDSPSection } from "./SpeakerDSPSection";
-import { FanControlSection } from "./FanControlSection";
 import { FixesSection } from "./FixesSection";
 import { LogsSection } from "./LogsSection";
 
@@ -13,15 +12,17 @@ const Content: FC = () => {
   const [buttonFix, setButtonFix] = useState<{ applied: boolean; error?: string; home_monitor_running?: boolean; intercept_enabled?: boolean }>({
     applied: false,
   });
-  const [sleepFix, setSleepFix] = useState<{
-    has_kargs: boolean;
-    kargs_found: string[];
-  }>({
-    has_kargs: false,
-    kargs_found: [],
+  const [lightSleep, setLightSleep] = useState<LightSleepStatus>({
+    applied: false,
+    light_sleep_present: [],
+    light_sleep_missing: [],
+    problematic_kargs: [],
+    has_problematic_kargs: false,
   });
   const [speakerDSP, setSpeakerDSP] = useState<SpeakerDSPStatus>({ enabled: false });
-  const [fan, setFan] = useState<FanStatus>({ available: false });
+  const [oxpec, setOxpec] = useState<OxpecStatus>({ applied: false });
+  const [resumeFix, setResumeFix] = useState<ResumeFixStatus>({ applied: false });
+  const [sleepEnable, setSleepEnable] = useState<SleepEnableStatus>({ applied: false });
   const [statusLoaded, setStatusLoaded] = useState(false);
   const [loading, setLoading] = useState<LoadingState>({ active: null, message: "" });
   const [result, setResult] = useState<ResultMessage | null>(null);
@@ -35,9 +36,11 @@ const Content: FC = () => {
     try {
       const status = await getStatus();
       setButtonFix(status.button_fix);
-      setSleepFix(status.sleep_fix);
+      setLightSleep(status.light_sleep);
       setSpeakerDSP(status.speaker_dsp);
-      setFan(status.fan);
+      setOxpec(status.oxpec);
+      setResumeFix(status.resume_fix);
+      setSleepEnable(status.sleep_enable);
     } catch (e) {
       console.error("Failed to get status:", e);
     } finally {
@@ -67,8 +70,7 @@ const Content: FC = () => {
             }}
           >
             <strong>Use at your own risk.</strong> This plugin modifies system files and hardware
-            settings. Incorrect use (especially fan control) can cause overheating or instability.
-            Fixes (buttons, sleep) will not persist across Bazzite updates and must be re-applied.
+            settings. Fixes will not persist across Bazzite updates and must be re-applied.
           </div>
         </PanelSectionRow>
       </PanelSection>
@@ -76,7 +78,14 @@ const Content: FC = () => {
       <FixesSection
         buttonFix={buttonFix}
         setButtonFix={setButtonFix}
-        sleepFix={sleepFix}
+        lightSleep={lightSleep}
+        setLightSleep={setLightSleep}
+        oxpec={oxpec}
+        setOxpec={setOxpec}
+        resumeFix={resumeFix}
+        setResumeFix={setResumeFix}
+        sleepEnable={sleepEnable}
+        setSleepEnable={setSleepEnable}
         loading={loading}
         setLoading={setLoading}
         showResult={showResult}
@@ -92,16 +101,6 @@ const Content: FC = () => {
         setLoading={setLoading}
         showResult={showResult}
         result={result}
-      />
-
-      <FanControlSection
-        fan={fan}
-        setFan={setFan}
-        loading={loading}
-        setLoading={setLoading}
-        showResult={showResult}
-        result={result}
-        refresh={refresh}
       />
 
       <LogsSection

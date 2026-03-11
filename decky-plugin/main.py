@@ -1,7 +1,8 @@
 """OneXPlayer Apex Tools — Decky Loader plugin backend.
 
-Exposes methods for button fix, home button monitor, and fan control
-to the frontend via Decky's RPC bridge.
+Exposes methods for button fix, home button monitor, EC sensor driver,
+resume recovery, sleep enablement, and speaker DSP to the frontend
+via Decky's RPC bridge.
 
 Each async method in the Plugin class becomes an RPC endpoint that
 the React frontend can call via @decky/api's `callable()`.
@@ -9,6 +10,7 @@ the React frontend can call via @decky/api's `callable()`.
 
 import asyncio
 import os
+import subprocess
 import sys
 
 # Official Decky module — injected by the loader at runtime.
@@ -20,19 +22,6 @@ sys.path.insert(0, os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules"))
 
 # Import helper modules with error handling so a single broken module
 # doesn't crash the entire plugin on load.
-try:
-    from fan_control import (
-        FanCurveRunner,
-        PROFILES,
-        find_temp_sensor,
-        get_controller,
-    )
-except Exception as e:
-    decky.logger.error(f"Failed to import fan_control: {e}")
-    FanCurveRunner = None
-    PROFILES = {}
-    find_temp_sensor = None
-    get_controller = None
 
 try:
     import button_fix as _button_fix_mod
@@ -53,11 +42,20 @@ except Exception as e:
     set_intercept_mode_impl = None
 
 try:
-    from sleep_fix import remove as remove_sleep_fix_impl, get_status as sleep_fix_status
+    import sleep_fix as _sleep_fix_mod
+    from sleep_fix import (
+        get_status as sleep_fix_status,
+        apply as apply_light_sleep_impl,
+        revert as revert_light_sleep_impl,
+        remove as remove_sleep_fix_impl,
+    )
 except Exception as e:
     decky.logger.error(f"Failed to import sleep_fix: {e}")
-    remove_sleep_fix_impl = None
+    _sleep_fix_mod = None
     sleep_fix_status = None
+    apply_light_sleep_impl = None
+    revert_light_sleep_impl = None
+    remove_sleep_fix_impl = None
 
 try:
     import speaker_dsp as _speaker_dsp_mod
@@ -102,6 +100,50 @@ except Exception as e:
     decky.logger.error(f"Failed to import home_button: {e}")
     _home_button_mod = None
     HomeButtonMonitor = None
+
+try:
+    import oxpec_loader as _oxpec_mod
+    from oxpec_loader import (
+        apply as apply_oxpec_impl,
+        revert as revert_oxpec_impl,
+        is_applied as oxpec_status,
+        ensure_loaded as ensure_oxpec_loaded,
+    )
+except Exception as e:
+    decky.logger.error(f"Failed to import oxpec_loader: {e}")
+    _oxpec_mod = None
+    apply_oxpec_impl = None
+    revert_oxpec_impl = None
+    oxpec_status = None
+    ensure_oxpec_loaded = None
+
+try:
+    import resume_fix as _resume_fix_mod
+    from resume_fix import (
+        apply as apply_resume_fix_impl,
+        revert as revert_resume_fix_impl,
+        is_applied as resume_fix_status,
+    )
+except Exception as e:
+    decky.logger.error(f"Failed to import resume_fix: {e}")
+    _resume_fix_mod = None
+    apply_resume_fix_impl = None
+    revert_resume_fix_impl = None
+    resume_fix_status = None
+
+try:
+    import sleep_enable as _sleep_enable_mod
+    from sleep_enable import (
+        apply as apply_sleep_enable_impl,
+        revert as revert_sleep_enable_impl,
+        is_applied as sleep_enable_status,
+    )
+except Exception as e:
+    decky.logger.error(f"Failed to import sleep_enable: {e}")
+    _sleep_enable_mod = None
+    apply_sleep_enable_impl = None
+    revert_sleep_enable_impl = None
+    sleep_enable_status = None
 
 # back_paddle.py is no longer used as a separate monitor — the button fix
 # patches HHD's hid_v2.py with full v1 intercept mode (apex_v1=True).
@@ -180,19 +222,53 @@ if _home_button_mod:
     _home_button_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 if _speaker_dsp_mod:
     _speaker_dsp_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
+if _oxpec_mod:
+    _oxpec_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
+if _resume_fix_mod:
+    _resume_fix_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
+if _sleep_fix_mod:
+    _sleep_fix_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
+if _sleep_enable_mod:
+    _sleep_enable_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
+
+
+def _clean_env():
+    """Strip Decky's LD_LIBRARY_PATH/LD_PRELOAD for subprocess calls."""
+    env = os.environ.copy()
+    for var in ("LD_LIBRARY_PATH", "LD_PRELOAD"):
+        env.pop(var, None)
+    return env
+
+
+def _restart_hhd():
+    """Restart HHD so it re-detects hardware (e.g. after loading oxpec)."""
+    _log_info("Restarting HHD to pick up new hardware...")
+    try:
+        r = subprocess.run(
+            ["systemctl", "list-units", "--plain", "--no-legend", "--type=service", "hhd*"],
+            capture_output=True, text=True, timeout=10, env=_clean_env()
+        )
+        units = []
+        for line in r.stdout.strip().splitlines():
+            parts = line.split()
+            if parts:
+                units.append(parts[0])
+        if not units:
+            units = ["hhd"]
+        for unit in units:
+            r = subprocess.run(
+                ["systemctl", "restart", unit],
+                capture_output=True, text=True, timeout=30, env=_clean_env()
+            )
+            if r.returncode == 0:
+                _log_info(f"Restarted {unit}")
+            else:
+                _log_error(f"Failed to restart {unit}: {r.stderr.strip()}")
+    except Exception as e:
+        _log_error(f"HHD restart failed: {e}")
 
 
 class Plugin:
-    # Fan controller instance (HwmonFanController, ECFanController, or PortIOFanController)
-    fan_ctrl = None
-    # Active fan curve runner (async task that adjusts fan speed based on temp)
-    fan_curve_runner = None
-    # Current fan mode: "auto" (EC controls fan) or "manual" (we control fan)
-    fan_mode = "auto"
-    # Active fan profile name: "silent", "balanced", "performance", or "custom"
-    fan_profile = "custom"
-    # Manual slider value (0-100%) — only used when profile is "custom"
-    fan_speed = 50
     # Home button HID monitor instance
     home_monitor = None
 
@@ -206,32 +282,24 @@ class Plugin:
         _log_info(f"Plugin dir: {decky.DECKY_PLUGIN_DIR}")
         _log_info(f"Log dir: {decky.DECKY_PLUGIN_LOG_DIR}")
 
-        # Init fan controller (best-effort — may fail if no backend)
-        if get_controller:
-            try:
-                self.fan_ctrl = get_controller()
-            except RuntimeError as e:
-                _log_error(f"Fan control init failed: {e}")
-                self.fan_ctrl = None
-        else:
-            _log_warning("fan_control module not available")
-
-        # Safety: always restore fan to auto on plugin startup.
-        # If the system crashed while fan was in manual mode (e.g. 0%),
-        # the EC stays in that state across reboots. This prevents
-        # thermal shutdowns from a stuck-off fan.
-        if self.fan_ctrl:
-            try:
-                self.fan_ctrl.set_auto()
-                _log_info("Fan restored to auto mode on startup")
-            except Exception as e:
-                _log_warning(f"Failed to restore fan auto mode: {e}")
-
         # Create home monitor instance (started automatically with button fix)
         if HomeButtonMonitor:
             self.home_monitor = HomeButtonMonitor()
         else:
             _log_warning("home_button module not available")
+
+        # Auto-load oxpec driver if not already loaded (survives reboots
+        # even when hotfix overlay is lost since plugin runs on every boot)
+        if ensure_oxpec_loaded:
+            try:
+                result = ensure_oxpec_loaded()
+                if result.get("success") and result.get("loaded"):
+                    _log_info("oxpec auto-loaded — restarting HHD for fan control")
+                    _restart_hhd()
+                elif result.get("already_loaded"):
+                    _log_info("oxpec already loaded")
+            except Exception as e:
+                _log_error(f"oxpec auto-load failed: {e}")
 
         # Auto-start home monitor if button fix is already applied
         if button_fix_status:
@@ -252,30 +320,22 @@ class Plugin:
         # Stop monitors if active
         if self.home_monitor:
             await self.home_monitor.stop()
-        # Stop any running fan curve task
-        if self.fan_curve_runner:
-            await self.fan_curve_runner.stop()
-        # Restore fan to auto so it doesn't stay stuck in manual after unload
-        if self.fan_ctrl:
-            try:
-                self.fan_ctrl.set_auto()
-            except Exception:
-                pass
 
     # -- Status overview --
 
     async def get_status(self):
         """Get combined status of all features — called by the frontend on load."""
-        fan_status = await self.get_fan_status()
         bf_status = button_fix_status() if button_fix_status else {"applied": False, "error": "module not loaded"}
         bf_status["home_monitor_running"] = self.home_monitor.is_running if self.home_monitor else False
         if bf_status.get("applied") and get_intercept_mode_impl:
             bf_status["intercept_enabled"] = get_intercept_mode_impl().get("enabled", True)
         return {
             "button_fix": bf_status,
-            "sleep_fix": sleep_fix_status() if sleep_fix_status else {"has_kargs": False, "kargs_found": []},
+            "light_sleep": sleep_fix_status() if sleep_fix_status else {"applied": False, "has_problematic_kargs": False, "problematic_kargs": [], "light_sleep_present": [], "light_sleep_missing": []},
             "speaker_dsp": speaker_dsp_status() if speaker_dsp_status else {"enabled": False, "profile": None, "speaker_node": None},
-            "fan": fan_status,
+            "oxpec": oxpec_status() if oxpec_status else {"applied": False, "error": "module not loaded"},
+            "resume_fix": resume_fix_status() if resume_fix_status else {"applied": False, "error": "module not loaded"},
+            "sleep_enable": sleep_enable_status() if sleep_enable_status else {"applied": False, "error": "module not loaded"},
         }
 
     # -- Logs --
@@ -295,8 +355,6 @@ class Plugin:
         import shutil
         from datetime import datetime
         try:
-            # Decky runs as root, so ~ would resolve to /root.
-            # Find the real user's home directory instead.
             user_home = _get_user_home()
             downloads = os.path.join(user_home, "Downloads")
             os.makedirs(downloads, exist_ok=True)
@@ -351,8 +409,6 @@ class Plugin:
             return {"success": False, "error": str(e)}
 
     # -- Intercept Mode --
-    # Toggles between full controller intercept (back paddles + everything)
-    # and face-buttons-only mode (just Home + QAM, Xbox gamepad normal).
 
     async def get_intercept_mode(self):
         if not get_intercept_mode_impl:
@@ -374,33 +430,53 @@ class Plugin:
             _log_error(f"Intercept mode exception: {e}")
             return {"success": False, "error": str(e)}
 
-    # -- Sleep Fix --
-    # S0i3 deep sleep doesn't work on Strix Halo with kernel 6.17 (needs 6.18+).
-    # This only provides cleanup of previously applied (broken) kargs.
+    # -- Light Sleep (s2idle kargs) --
 
-    async def get_sleep_fix_status(self):
+    async def get_light_sleep_status(self):
         if not sleep_fix_status:
-            return {"has_kargs": False, "kargs_found": []}
+            return {"applied": False, "has_problematic_kargs": False, "problematic_kargs": [], "light_sleep_present": [], "light_sleep_missing": []}
         return sleep_fix_status()
 
+    async def apply_light_sleep(self):
+        if not apply_light_sleep_impl:
+            return {"success": False, "error": "sleep_fix module not loaded"}
+        _log_info("Applying light sleep kargs...")
+        try:
+            result = await asyncio.to_thread(apply_light_sleep_impl)
+            if result.get("success"):
+                _log_info(f"Light sleep applied: {result.get('message', 'OK')}")
+            else:
+                _log_error(f"Light sleep failed: {result.get('error', 'unknown')}")
+            return result
+        except Exception as e:
+            _log_error(f"Light sleep exception: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def revert_light_sleep(self):
+        if not revert_light_sleep_impl:
+            return {"success": False, "error": "sleep_fix module not loaded"}
+        _log_info("Reverting light sleep kargs...")
+        try:
+            result = await asyncio.to_thread(revert_light_sleep_impl)
+            if result.get("success"):
+                _log_info(f"Light sleep reverted: {result.get('message', 'OK')}")
+            else:
+                _log_error(f"Light sleep revert failed: {result.get('error', 'unknown')}")
+            return result
+        except Exception as e:
+            _log_error(f"Light sleep revert exception: {e}")
+            return {"success": False, "error": str(e)}
+
+    # Legacy compat — old frontend called remove_sleep_fix
     async def remove_sleep_fix(self):
         if not remove_sleep_fix_impl:
             return {"success": False, "error": "sleep_fix module not loaded"}
-        _log_info("Removing sleep fix kargs and udev rules...")
         try:
-            result = await asyncio.to_thread(remove_sleep_fix_impl)
-            if result.get("success"):
-                _log_info(f"Sleep fix removal: {result.get('message', 'OK')}")
-            else:
-                _log_error(f"Sleep fix removal failed: {result.get('error', 'unknown')}")
-            return result
+            return await asyncio.to_thread(remove_sleep_fix_impl)
         except Exception as e:
-            _log_error(f"Sleep fix removal exception: {e}")
             return {"success": False, "error": str(e)}
 
     # -- Speaker DSP --
-    # PipeWire parametric EQ for internal speakers.
-    # Writes filter-chain config to user's pipewire.conf.d directory.
 
     async def get_speaker_dsp_status(self):
         if not speaker_dsp_status:
@@ -537,7 +613,6 @@ class Plugin:
     # -- Home Button Monitor (private — managed by button fix lifecycle) --
 
     def _start_home_monitor(self):
-        """Start the home button monitor (called after button fix apply)."""
         if not self.home_monitor:
             if HomeButtonMonitor:
                 self.home_monitor = HomeButtonMonitor()
@@ -550,111 +625,119 @@ class Plugin:
             _log_info("Home button monitor started")
 
     async def _stop_home_monitor(self):
-        """Stop the home button monitor (called before button fix revert)."""
         if self.home_monitor and self.home_monitor.is_running:
             await self.home_monitor.stop()
             _log_info("Home button monitor stopped")
 
-    # -- Fan Control --
-    # Three modes of operation:
-    #   1. Auto — EC firmware controls the fan (default, safest)
-    #   2. Manual + custom — user sets a fixed fan speed via slider
-    #   3. Manual + profile — FanCurveRunner adjusts speed based on temp curve
+    # -- oxpec EC Sensor Driver --
 
-    async def get_fan_status(self):
-        """Read current fan state from hardware and return to frontend."""
-        if not self.fan_ctrl:
-            return {"available": False, "error": "No fan control backend"}
+    async def get_oxpec_status(self):
+        if not oxpec_status:
+            return {"applied": False, "error": "module not loaded"}
+        return oxpec_status()
+
+    async def apply_oxpec(self):
+        if not apply_oxpec_impl:
+            return {"success": False, "error": "oxpec_loader module not loaded"}
+        _log_info("Installing oxpec driver...")
         try:
-            rpm = self.fan_ctrl.get_rpm()
-            percent = self.fan_ctrl.get_percent()
-            mode = self.fan_ctrl.get_mode()
-            # Read CPU temp from the best available sensor
-            temp_path = find_temp_sensor() if find_temp_sensor else None
-            temp = None
-            if temp_path:
-                with open(temp_path) as f:
-                    temp = int(f.read().strip()) / 1000  # millidegrees to degrees
-            return {
-                "available": True,
-                "rpm": rpm,
-                "percent": round(percent, 1),
-                "hw_mode": mode,         # actual EC mode (auto/manual)
-                "temp": round(temp, 1) if temp is not None else None,
-                "mode": self.fan_mode,   # our tracked mode
-                "profile": self.fan_profile,
-                "speed": self.fan_speed,
-                "backend": self.fan_ctrl.backend_name,
-            }
+            result = await asyncio.to_thread(apply_oxpec_impl)
+            if result.get("success"):
+                _log_info(f"oxpec applied: {result.get('message', 'OK')}")
+                # Restart HHD so it detects the new hwmon for fan control
+                await asyncio.to_thread(_restart_hhd)
+            else:
+                _log_error(f"oxpec failed: {result.get('error', 'unknown')}")
+            return result
         except Exception as e:
-            return {"available": False, "error": str(e)}
+            _log_error(f"oxpec exception: {e}")
+            return {"success": False, "error": str(e)}
 
-    async def set_fan_mode(self, mode):
-        """Set fan mode: 'auto' or 'manual'."""
-        if not self.fan_ctrl:
-            return {"success": False, "error": "No fan control backend"}
-        self.fan_mode = mode
-        if mode == "auto":
-            # Stop any running fan curve and hand control back to the EC
-            if self.fan_curve_runner:
-                await self.fan_curve_runner.stop()
-                self.fan_curve_runner = None
-            self.fan_ctrl.set_auto()
-            return {"success": True, "mode": "auto"}
-        else:
-            # Switch to manual and apply the current slider speed
-            self.fan_ctrl.set_manual(self.fan_speed)
-            return {"success": True, "mode": "manual"}
+    async def revert_oxpec(self):
+        if not revert_oxpec_impl:
+            return {"success": False, "error": "oxpec_loader module not loaded"}
+        _log_info("Removing oxpec driver...")
+        try:
+            result = await asyncio.to_thread(revert_oxpec_impl)
+            if result.get("success"):
+                _log_info(f"oxpec reverted: {result.get('message', 'OK')}")
+            else:
+                _log_error(f"oxpec revert failed: {result.get('error', 'unknown')}")
+            return result
+        except Exception as e:
+            _log_error(f"oxpec revert exception: {e}")
+            return {"success": False, "error": str(e)}
 
-    async def set_fan_speed(self, percent):
-        """Set manual fan speed (0-100). Stops any active curve."""
-        if not self.fan_ctrl:
-            return {"success": False, "error": "No fan control backend"}
-        self.fan_speed = max(0, min(100, int(percent)))
-        self.fan_profile = "custom"  # explicit speed overrides any profile
-        # Stop fan curve if one is running — user wants direct control
-        if self.fan_curve_runner:
-            await self.fan_curve_runner.stop()
-            self.fan_curve_runner = None
-        if self.fan_mode == "manual":
-            self.fan_ctrl.set_manual(self.fan_speed)
-        return {"success": True, "speed": self.fan_speed}
+    # -- Resume Recovery --
 
-    async def set_fan_profile(self, name):
-        """Set fan profile: 'silent', 'balanced', 'performance', 'custom'.
+    async def get_resume_fix_status(self):
+        if not resume_fix_status:
+            return {"applied": False, "error": "module not loaded"}
+        return resume_fix_status()
 
-        Profiles other than 'custom' start a FanCurveRunner that periodically
-        reads the CPU temp and adjusts fan speed according to the curve.
-        """
-        if not self.fan_ctrl:
-            return {"success": False, "error": "No fan control backend"}
-        self.fan_profile = name
+    async def apply_resume_fix(self):
+        if not apply_resume_fix_impl:
+            return {"success": False, "error": "resume_fix module not loaded"}
+        _log_info("Installing resume recovery fix...")
+        try:
+            result = await asyncio.to_thread(apply_resume_fix_impl)
+            if result.get("success"):
+                _log_info(f"Resume fix applied: {result.get('message', 'OK')}")
+            else:
+                _log_error(f"Resume fix failed: {result.get('error', 'unknown')}")
+            return result
+        except Exception as e:
+            _log_error(f"Resume fix exception: {e}")
+            return {"success": False, "error": str(e)}
 
-        # Always stop the existing curve before switching
-        if self.fan_curve_runner:
-            await self.fan_curve_runner.stop()
-            self.fan_curve_runner = None
+    async def revert_resume_fix(self):
+        if not revert_resume_fix_impl:
+            return {"success": False, "error": "resume_fix module not loaded"}
+        _log_info("Removing resume recovery fix...")
+        try:
+            result = await asyncio.to_thread(revert_resume_fix_impl)
+            if result.get("success"):
+                _log_info(f"Resume fix reverted: {result.get('message', 'OK')}")
+            else:
+                _log_error(f"Resume fix revert failed: {result.get('error', 'unknown')}")
+            return result
+        except Exception as e:
+            _log_error(f"Resume fix revert exception: {e}")
+            return {"success": False, "error": str(e)}
 
-        if name == "custom":
-            # Custom = direct slider control, no curve
-            if self.fan_mode == "manual":
-                self.fan_ctrl.set_manual(self.fan_speed)
-            return {"success": True, "profile": "custom"}
+    # -- Sleep Enable --
 
-        # Look up the predefined curve for this profile
-        curve = PROFILES.get(name)
-        if not curve:
-            return {"success": False, "error": f"Unknown profile: {name}"}
+    async def get_sleep_enable_status(self):
+        if not sleep_enable_status:
+            return {"applied": False, "error": "module not loaded"}
+        return sleep_enable_status()
 
-        temp_sensor = find_temp_sensor() if find_temp_sensor else None
-        if not temp_sensor:
-            return {"success": False, "error": "No temperature sensor found"}
+    async def apply_sleep_enable(self):
+        if not apply_sleep_enable_impl:
+            return {"success": False, "error": "sleep_enable module not loaded"}
+        _log_info("Applying sleep enablement fix...")
+        try:
+            result = await asyncio.to_thread(apply_sleep_enable_impl)
+            if result.get("success"):
+                _log_info(f"Sleep enable applied: {result.get('message', 'OK')}")
+            else:
+                _log_error(f"Sleep enable failed: {result.get('error', 'unknown')}")
+            return result
+        except Exception as e:
+            _log_error(f"Sleep enable exception: {e}")
+            return {"success": False, "error": str(e)}
 
-        # Start the curve runner — it will adjust fan speed every 2 seconds
-        self.fan_mode = "manual"
-        self.fan_curve_runner = FanCurveRunner(
-            self.fan_ctrl, temp_sensor, curve, interval=2.0
-        )
-        loop = asyncio.get_event_loop()
-        self.fan_curve_runner.start(loop)
-        return {"success": True, "profile": name}
+    async def revert_sleep_enable(self):
+        if not revert_sleep_enable_impl:
+            return {"success": False, "error": "sleep_enable module not loaded"}
+        _log_info("Reverting sleep enablement fix...")
+        try:
+            result = await asyncio.to_thread(revert_sleep_enable_impl)
+            if result.get("success"):
+                _log_info(f"Sleep enable reverted: {result.get('message', 'OK')}")
+            else:
+                _log_error(f"Sleep enable revert failed: {result.get('error', 'unknown')}")
+            return result
+        except Exception as e:
+            _log_error(f"Sleep enable revert exception: {e}")
+            return {"success": False, "error": str(e)}

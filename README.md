@@ -1,16 +1,22 @@
 # OneXPlayer Apex — Bazzite Fixes
 
-A [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin for the **OneXPlayer Apex** (AMD Ryzen AI Max+ 395 "Strix Halo") running **Bazzite**. Provides hardware fixes, speaker EQ, and fan control — all accessible from the SteamOS Quick Access Menu.
+A [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin for the **OneXPlayer Apex** (AMD Ryzen AI Max+ 395 "Strix Halo") running **Bazzite**. Provides hardware fixes, sleep enablement, and speaker EQ — all accessible from the SteamOS Quick Access Menu.
 
 > **This is not a general-purpose tool.** It is specifically for the OneXPlayer Apex on Bazzite. It patches device-specific HID mappings, EC registers, and PipeWire configs that are unique to this hardware.
 
 ## Screenshots
 
-| Fixes & Speaker DSP | EQ Sliders | Fan Control & Test Sound |
-|:---:|:---:|:---:|
-| ![Fixes and Speaker DSP](screenshots/fixes-and-speaker-dsp.png) | ![EQ Sliders](screenshots/eq-sliders.png) | ![Fan Control and Test Sound](screenshots/fan-control-and-test-sound.png) |
+| Fixes & Speaker DSP | EQ Sliders |
+|:---:|:---:|
+| ![Fixes and Speaker DSP](screenshots/fixes-and-speaker-dsp.png) | ![EQ Sliders](screenshots/eq-sliders.png) |
 
 ## Features
+
+### EC Sensor Driver (oxpec)
+Loads the `oxpec` kernel module which provides hwmon sensor access and enables [HHD](https://github.com/hhd-dev/hhd)'s native fan curves. With this driver loaded, fan control is handled natively by HHD and PowerControl — no custom fan curve code needed.
+
+- Toggle on to install the module and a systemd service that loads it on boot
+- Built for kernel `6.17.7-ba25.fc43.x86_64` — shows a warning on kernel mismatch
 
 ### Button Fix
 Patches [HHD](https://github.com/hhd-dev/hhd) to recognize the Apex as a known device. Without this, HHD grabs input but doesn't forward button events — face buttons, Home, and QAM buttons are all dead.
@@ -33,19 +39,43 @@ Applies a parametric EQ to the internal speakers using PipeWire's built-in filte
 - **Test Sound**: plays a bundled music track ([NCS](https://ncs.io/) licensed) for quick EQ previewing
 - Only affects internal speakers — headphones and external audio pass through unmodified
 
-### Fan Control
-Direct fan control via the Apex's embedded controller. Three backends are tried in order: `oxpec` hwmon driver, EC debugfs (`ec_sys`), or raw port I/O (`/dev/port`).
+### Resume Recovery
+Installs a background service that recovers the gamepad after sleep by rebinding the xHCI USB controller. Without this, the Xbox controller disappears after wake and requires a reboot.
 
-- **Profiles**: Silent, Balanced, Performance — predefined fan curves based on CPU temperature
-- **Custom slider**: set an exact fan speed percentage
-- **Auto mode**: returns control to the EC's built-in fan management
-- Live readout of temperature, RPM, and duty cycle
+- Listens for D-Bus resume events and rebinds PCI device `0000:65:00.4`
+- Two-phase recovery: fast (1s) then fallback (2s)
+
+### Light Sleep
+Applies kernel parameters for s2idle light sleep. **Requires "ACPI Auto configuration" enabled in BIOS.**
+
+- Applies `mem_sleep_default=s2idle`
+- Automatically removes known-problematic legacy kargs (`amd_iommu=off`, etc.)
+- Requires reboot after applying (button fix must be re-applied after reboot)
+
+> **Note:** S0i3 deep sleep is still broken on Strix Halo with kernel 6.17 (requires ACPI C4 in kernel 6.18+). This is *light sleep* (s2idle) which provides lower power draw than staying awake but not as deep as S0i3.
+
+#### Current working kargs
+
+```
+mem_sleep_default=s2idle
+```
+
+#### Known problematic kargs (auto-removed)
+
+| Karg | Issue |
+|------|-------|
+| `amd_iommu=off` | Blocks S0i3 path entirely |
+| `amd_iommu=on` | Invalid AMD parameter, silently ignored |
+| `acpi.ec_no_wakeup=1` | Prevents EC-based wakeup |
+| `amdgpu.cwsr_enable=0` | Compute-specific, not needed |
+| `amdgpu.gttsize=126976` | Not sleep-related |
+| `ttm.pages_limit=32505856` | Not sleep-related |
+
+### Sleep Fix (Fan Noise)
+Neutralizes the `fw-fanctrl-suspend` script — a Framework Laptop tool shipped with Bazzite that errors on non-Framework hardware, keeping fans running during sleep. Also installs a udev rule to prevent the fingerprint reader from immediately waking the device.
 
 ### Home Button
 Monitors the Apex's hidraw device for the Home/Orange button press (sends a non-standard `LCtrl+LAlt+LGUI` combo) and launches HHD's overlay UI.
-
-### Sleep Fix
-S0i3 deep sleep is currently broken on Strix Halo with kernel 6.17 (requires ACPI C4 support in kernel 6.18+). The plugin provides a cleanup tool to remove any previously applied (broken) sleep kargs.
 
 ## Installation
 
@@ -82,36 +112,27 @@ bun run package
 # Then install the zip via Option A or B
 ```
 
-## Standalone Scripts
-
-For users who prefer the terminal or aren't using Decky:
-
-```bash
-# Fix face buttons
-sudo bash scripts/fix-buttons.sh
-
-# Fan control CLI
-sudo scripts/oxp-fan-ctl status
-sudo scripts/oxp-fan-ctl set 60
-sudo scripts/oxp-fan-ctl auto
-
-# Install Home button as a systemd service
-sudo bash scripts/setup-home-button.sh
-```
-
 ## Important Notes
 
-- **Temporary fixes.** The button fix patches files in `/usr/lib/` which get overwritten on Bazzite updates. Re-apply after updates.
+- **Temporary fixes.** The button fix and sleep fix patch files in `/usr/lib/` which get overwritten on Bazzite updates. Re-apply after updates.
 - **Immutable filesystem.** Uses `ostree admin unlock --hotfix` to make `/usr/lib` writable. This unlock is lost on reboot/update.
-- **Requires root.** The Decky plugin runs with the `root` flag. Standalone scripts require `sudo`.
-- **fw-fanctrl-suspend (known Bazzite issue).** The `fw-fanctrl` package ships a sleep hook that fails on non-Framework hardware. See [sleep research](docs/sleep-research.md#fw-fanctrl-suspend-issue) for how to neutralize it.
+- **Requires root.** The Decky plugin runs with the `root` flag.
+- **Fan control.** With the oxpec driver loaded, fan curves are handled natively by HHD / PowerControl. No custom fan control is included in this plugin.
+
+## Acknowledgments
+
+The `oxpec` kernel module, `xpad-fix3` resume recovery script, and `fw-fanctrl-suspend` sleep fix are based on fix packages shared by **스트로바쿠다스 (drama8448)** from the Korean OneXPlayer community on DCInside UMPC Gallery:
+
+- [Apex Bazzite Fan Control Patch Update](https://gall.dcinside.com/mgallery/board/view/?id=umpc&no=141816) — Original post with oxpec.ko, hhd-autolink, xpad-fix3, and fw-fanctrl-suspend fixes
+
+The HHD button fix patches are built against [HHD v4.1.5](https://github.com/hhd-dev/hhd) by [antheas](https://github.com/antheas).
 
 ## When Will This Be Unnecessary?
 
 These fixes become obsolete when:
 
 - **HHD** adds Apex to its device list upstream ([hhd-dev/hhd](https://github.com/hhd-dev/hhd))
-- **Bazzite's kernel** includes the `oxpec` driver patch for Strix Halo fan control
+- **Bazzite's kernel** includes the `oxpec` driver for Strix Halo EC sensor access
 - **Kernel 6.18+** ships with ACPI C4 support for S0i3 deep sleep on Strix Halo
 
 ## Hardware Reference
