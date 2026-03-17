@@ -468,6 +468,12 @@ def turbo_loop(
                 keyboard_is = "qam"
                 qam_hhd = True
 
+    # Apex: physical QAM → Steam QAM, physical KB → HHD overlay
+    # (button codes swapped in APEX_BTN_MAPPINGS so Multiplexer routes correctly)
+    if dconf.get("apex", False):
+        keyboard_is = "steam_qam"
+        qam_hhd = True
+
     multiplexer = Multiplexer(
         trigger="analog_to_discrete",
         dpad="analog_to_discrete",
@@ -720,6 +726,12 @@ def controller_loop(
                 qam_hhd = True
     else:
         qam_no_release = True
+
+    # Apex: physical QAM → Steam QAM, physical KB → HHD overlay
+    # (button codes swapped in APEX_BTN_MAPPINGS so Multiplexer routes correctly)
+    if dconf.get("apex", False):
+        keyboard_is = "steam_qam"
+        qam_hhd = True
 
     multiplexer = Multiplexer(
         trigger="analog_to_discrete",
