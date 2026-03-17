@@ -40,12 +40,16 @@ BTN_MAPPINGS_NONTURBO: dict[int, Button] = {
 }
 
 # Apex-specific keyboard mappings — Home is KEY_G (not KEY_D on standard OXP)
+# Button roles swapped vs physical labels: physical QAM (KEY_LEFTALT) maps to
+# "keyboard" so the Multiplexer routes it via keyboard_is="steam_qam" → Steam QAM.
+# Physical KB (KEY_O) maps to "share" so it enters the QAM handler with
+# qam_hhd=True → HHD overlay on single tap.
 APEX_BTN_MAPPINGS: dict[int, Button] = {
     B("KEY_VOLUMEUP"): "key_volumeup",
     B("KEY_VOLUMEDOWN"): "key_volumedown",
     B("KEY_G"): "mode",
-    B("KEY_O"): "keyboard",
-    B("KEY_LEFTALT"): "share",
+    B("KEY_O"): "share",           # physical KB → QAM handler → HHD overlay
+    B("KEY_LEFTALT"): "keyboard",  # physical QAM → keyboard handler → Steam QAM
 }
 
 ONEX_DEFAULT_CONF = {

@@ -132,6 +132,7 @@ Bazzite ships periodic kernel updates (e.g. `ba25` → `ba28`). When the kernel 
 
 ## Important Notes
 
+- **Secure Boot must be disabled.** The bundled `oxpec.ko` is unsigned. If Secure Boot is enabled, the kernel will refuse to load it. Disable Secure Boot in BIOS before using the oxpec driver.
 - **Temporary fixes.** The button fix and sleep fix patch files in `/usr/lib/` which get overwritten on Bazzite updates. Re-apply after updates.
 - **Immutable filesystem.** Uses `ostree admin unlock --hotfix` to make `/usr/lib` writable. This unlock is lost on reboot/update.
 - **Requires root.** The Decky plugin runs with the `root` flag.
