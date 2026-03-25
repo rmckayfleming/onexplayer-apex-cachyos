@@ -96,6 +96,17 @@ def gen_rgb_solid(r, g, b):
     return gen_cmd(0x07, [0xFE] + 20 * [r, g, b] + [0x00])
 
 
+def gen_vibration(strength: int):
+    """Generate a vibration command via vendor HID. strength: 0-255."""
+    mode = 0x02 if strength == 0 else 0x01
+    cmd = (
+        [0x02, 0x38, 0x02, 0xE3, 0x39, 0xE3, 0x39, 0xE3, 0x39, mode, strength, strength, 0xE3, 0x39, 0xE3]
+        + [0x00] * 35
+        + [0x39, 0xE3, 0x39, 0xE3, 0xE3, 0x02, 0x04, 0x39, 0x39]
+    )
+    return gen_cmd_v1(0xB3, cmd)
+
+
 KBD_NAME = "keyboard"
 HOME_NAME = "guide"
 KBD_NAME_NON_TURBO = "share"
@@ -166,6 +177,7 @@ class OxpHidrawV2(GenericGamepadHidraw):
         self.prev_brightness = None
         self.prev_stick = None
         self.prev_stick_enabled = None
+        self.prev_vibration = None
         # self.prev_center = None
         # self.prev_center_enabled = None
 
@@ -200,8 +212,20 @@ class OxpHidrawV2(GenericGamepadHidraw):
         if not self.dev:
             return
 
-        # Apex v1 mode has no RGB — only flush queued commands (intercept enable)
+        # Apex v1 intercept mode — handle rumble via vendor HID
         if self.apex_v1:
+            for ev in events:
+                if ev["type"] == "rumble":
+                    # Combine strong/weak into single 0-255 strength
+                    strength = int(
+                        max(ev.get("strong_magnitude", 0), ev.get("weak_magnitude", 0))
+                        * 255
+                    )
+                    strength = max(0, min(255, strength))
+                    if strength != self.prev_vibration:
+                        self.queue_cmd.append(gen_vibration(strength))
+                        self.prev_vibration = strength
+
             curr = time.perf_counter()
             if self.queue_cmd and curr - self.next_send > 0:
                 cmd = self.queue_cmd.popleft()
