@@ -97,7 +97,17 @@ def gen_rgb_solid(r, g, b):
 
 
 def gen_vibration(strength: int):
-    """Generate a vibration command via vendor HID. strength: 0-255."""
+    """Generate a vibration command via vendor HID. strength: 0-255.
+
+    NOTE: Sending 0xB3 while intercept mode (0xB2) is active causes the
+    firmware to exit intercept mode entirely (red light / mouse mode).
+    This is a hardware limitation — all tested approaches fail:
+      - 0xB3 v1 framing (0x3F): vibrates but exits intercept
+      - 0xB3 v2 framing (0xFF): no vibration, still exits intercept
+      - Xbox gamepad FF_RUMBLE via evdev: firmware ignores in intercept
+      - Direct USB output report to Xbox endpoint: no vibration at all
+    Rumble is therefore unavailable in intercept mode.
+    """
     mode = 0x02 if strength == 0 else 0x01
     cmd = (
         [0x02, 0x38, 0x02, 0xE3, 0x39, 0xE3, 0x39, 0xE3, 0x39, mode, strength, strength, 0xE3, 0x39, 0xE3]
@@ -177,7 +187,6 @@ class OxpHidrawV2(GenericGamepadHidraw):
         self.prev_brightness = None
         self.prev_stick = None
         self.prev_stick_enabled = None
-        self.prev_vibration = None
         # self.prev_center = None
         # self.prev_center_enabled = None
 
@@ -212,20 +221,11 @@ class OxpHidrawV2(GenericGamepadHidraw):
         if not self.dev:
             return
 
-        # Apex v1 intercept mode — handle rumble via vendor HID
+        # Apex v1 intercept mode — rumble is unavailable.
+        # Sending 0xB3 via vendor HID exits intercept mode (firmware
+        # limitation). Xbox gamepad FF and direct USB writes also fail.
+        # Only process queued commands (e.g. intercept-enable on open).
         if self.apex_v1:
-            for ev in events:
-                if ev["type"] == "rumble":
-                    # Combine strong/weak into single 0-255 strength
-                    strength = int(
-                        max(ev.get("strong_magnitude", 0), ev.get("weak_magnitude", 0))
-                        * 255
-                    )
-                    strength = max(0, min(255, strength))
-                    if strength != self.prev_vibration:
-                        self.queue_cmd.append(gen_vibration(strength))
-                        self.prev_vibration = strength
-
             curr = time.perf_counter()
             if self.queue_cmd and curr - self.next_send > 0:
                 cmd = self.queue_cmd.popleft()
