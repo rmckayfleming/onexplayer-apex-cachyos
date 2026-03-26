@@ -1,6 +1,6 @@
-"""OneXPlayer Apex Tools — Decky Loader plugin backend.
+"""OneXPlayer Apex Tools — Decky Loader plugin backend (CachyOS).
 
-Exposes methods for button fix, home button monitor, EC sensor driver,
+Exposes methods for InputPlumber profile management, EC sensor driver,
 resume recovery, sleep enablement, and speaker DSP to the frontend
 via Decky's RPC bridge.
 
@@ -254,32 +254,20 @@ def _clean_env():
     return env
 
 
-def _restart_hhd():
-    """Restart HHD so it re-detects hardware (e.g. after loading oxpec)."""
-    _log_info("Restarting HHD to pick up new hardware...")
+def _restart_inputplumber():
+    """Restart InputPlumber so it re-detects hardware (e.g. after loading oxpec)."""
+    _log_info("Restarting InputPlumber to pick up new hardware...")
     try:
         r = subprocess.run(
-            ["systemctl", "list-units", "--plain", "--no-legend", "--type=service", "hhd*"],
-            capture_output=True, text=True, timeout=10, env=_clean_env()
+            ["systemctl", "restart", "inputplumber.service"],
+            capture_output=True, text=True, timeout=30, env=_clean_env()
         )
-        units = []
-        for line in r.stdout.strip().splitlines():
-            parts = line.split()
-            if parts:
-                units.append(parts[0])
-        if not units:
-            units = ["hhd"]
-        for unit in units:
-            r = subprocess.run(
-                ["systemctl", "restart", unit],
-                capture_output=True, text=True, timeout=30, env=_clean_env()
-            )
-            if r.returncode == 0:
-                _log_info(f"Restarted {unit}")
-            else:
-                _log_error(f"Failed to restart {unit}: {r.stderr.strip()}")
+        if r.returncode == 0:
+            _log_info("Restarted InputPlumber")
+        else:
+            _log_error(f"Failed to restart InputPlumber: {r.stderr.strip()}")
     except Exception as e:
-        _log_error(f"HHD restart failed: {e}")
+        _log_error(f"InputPlumber restart failed: {e}")
 
 
 class Plugin:
@@ -315,7 +303,7 @@ class Plugin:
             try:
                 result = await asyncio.to_thread(xhci_check_and_recover)
                 if result.get("needed") and result.get("success"):
-                    _log_info("xHCI recovered — will restart HHD")
+                    _log_info("xHCI recovered — will restart InputPlumber")
                     hhd_restart_needed = True
                 elif result.get("needed") and not result.get("success"):
                     _log_error("xHCI recovery failed — gamepad may not work")
@@ -337,8 +325,8 @@ class Plugin:
                 _log_error(f"oxpec auto-load failed: {e}")
 
         if hhd_restart_needed:
-            _log_info("Restarting HHD to pick up recovered hardware")
-            _restart_hhd()
+            _log_info("Restarting InputPlumber to pick up recovered hardware")
+            _restart_inputplumber()
 
         # Auto-start monitors if button fix is already applied
         if button_fix_status:
@@ -408,9 +396,8 @@ class Plugin:
             _log_error(f"Failed to save logs: {e}")
             return {"success": False, "error": str(e)}
 
-    # -- Button Fix --
-    # Patches HHD (Handheld Daemon) to recognize Apex face buttons.
-    # Requires ostree filesystem unlock since Bazzite is immutable.
+    # -- Button Fix (InputPlumber profile) --
+    # Installs InputPlumber device profile and capability map for the Apex.
 
     async def get_button_fix_status(self):
         if not button_fix_status:
@@ -684,8 +671,8 @@ class Plugin:
             result = await asyncio.to_thread(apply_oxpec_impl)
             if result.get("success"):
                 _log_info(f"oxpec applied: {result.get('message', 'OK')}")
-                # Restart HHD so it detects the new hwmon for fan control
-                await asyncio.to_thread(_restart_hhd)
+                # Restart InputPlumber so it detects the new hardware
+                await asyncio.to_thread(_restart_inputplumber)
             else:
                 _log_error(f"oxpec failed: {result.get('error', 'unknown')}")
             return result
@@ -757,9 +744,9 @@ class Plugin:
             if result.get("already_ok"):
                 return {"success": True, "message": "Gamepad already connected"}
             if result.get("success"):
-                _log_info("xHCI recovered — restarting HHD")
-                _restart_hhd()
-                return {"success": True, "message": "Gamepad recovered and HHD restarted"}
+                _log_info("xHCI recovered — restarting InputPlumber")
+                _restart_inputplumber()
+                return {"success": True, "message": "Gamepad recovered and InputPlumber restarted"}
             return {"success": False, "error": "Recovery failed — gamepad not detected after rebind"}
         except Exception as e:
             _log_error(f"Gamepad recovery exception: {e}")

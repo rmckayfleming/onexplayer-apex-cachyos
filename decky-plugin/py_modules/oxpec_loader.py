@@ -1,7 +1,7 @@
 """EC platform driver (oxpec) loader for OneXPlayer Apex.
 
 Installs and loads the oxpec kernel module which provides hwmon sensors
-and enables HHD native fan curves. Bundled .ko files are organized per
+and enables native fan curves. Bundled .ko files are organized per
 kernel version in py_modules/oxpec/<kernel>/oxpec.ko.
 
 Loading strategy:
@@ -71,7 +71,7 @@ def _make_service_content(ko_path):
 Description=Load oxpec EC platform driver for OneXPlayer
 DefaultDependencies=no
 After=systemd-modules-load.service
-Before=hhd@.service hhd.service
+Before=inputplumber.service
 
 [Service]
 Type=oneshot
@@ -234,7 +234,7 @@ def is_applied():
 
 
 def _install_bundled_ko(bundled_ko):
-    """Copy bundled .ko to /var/lib/oxpec/ with SELinux context.
+    """Copy bundled .ko to /var/lib/oxpec/.
 
     Returns (success, error_msg).
     """
@@ -244,13 +244,6 @@ def _install_bundled_ko(bundled_ko):
         shutil.copy2(bundled_ko, _INSTALL_KO)
     except Exception as e:
         return False, f"Failed to copy oxpec.ko: {e}"
-    try:
-        subprocess.run(
-            ["chcon", "-t", "modules_object_t", _INSTALL_KO],
-            capture_output=True, text=True, timeout=10, env=_clean_env()
-        )
-    except Exception:
-        pass  # SELinux may not be enforcing
     return True, None
 
 
@@ -364,7 +357,6 @@ def apply():
             return {"success": False, "error": err, "steps": steps}
         _log_info(f"Copied oxpec.ko to {_INSTALL_KO}")
         steps.append(f"Copied oxpec.ko to {_INSTALL_DIR}")
-        steps.append("Set SELinux context")
 
         ko_for_service = _INSTALL_KO
 

@@ -1,11 +1,11 @@
-"""Speaker DSP enhancement for OneXPlayer Apex on Bazzite.
+"""Speaker DSP enhancement for OneXPlayer Apex.
 
 Writes a PipeWire filter-chain config that applies parametric EQ to the
 internal speakers only. Uses PipeWire's builtin biquad filters — zero
 external dependencies.
 
 Config is written to ~/.config/pipewire/pipewire.conf.d/ so it survives
-Bazzite updates and auto-loads on PipeWire startup.
+OS updates and auto-loads on PipeWire startup.
 """
 
 import json

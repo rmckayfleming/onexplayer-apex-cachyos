@@ -6,8 +6,9 @@ B/Y on the Xbox gamepad (SECOND_FUNC mode, funcCode=0x05).
 
 This module uses firmware-level button remapping (CID 0xB4) to assign
 unique keyboard keycodes (F13/F14) to the paddles, then activates
-"report mode" so HHD can read the paddle events natively on its virtual
-gamepad (extra_l1/extra_r1). No separate uinput device needed.
+"report mode" so InputPlumber can read the paddle events via its
+capability map (KeyF13→LeftPaddle1, KeyF14→RightPaddle1).
+No separate uinput device needed.
 
 No intercept mode — the Xbox gamepad stays fully active with
 rumble/vibration support and native analog input.
@@ -15,7 +16,7 @@ rumble/vibration support and native analog input.
 Protocol:
   1. Send CID 0xB4 key mapping to remap M1→F14, M2→F13 (persists in firmware)
   2. Send B2 enable then B2 disable to activate "report mode" (flag 0x80)
-  3. HHD reads B2 report-mode packets and maps M1/M2 → extra_r1/extra_l1
+  3. InputPlumber reads F13/F14 keyboard events and maps them to LeftPaddle1/RightPaddle1
 
 B2 report-mode packet format (64 bytes):
   byte[0]  = 0xB2 (CID)
@@ -256,7 +257,7 @@ def setup_paddles():
         if not _activate_report_mode(fd):
             return {"success": False, "error": "Report mode activation failed"}
 
-        _log_info("Back paddle setup complete — HHD will handle events")
+        _log_info("Back paddle setup complete — InputPlumber will handle events")
         return {"success": True}
     except OSError as e:
         _log_error(f"Back paddle setup error: {e}")

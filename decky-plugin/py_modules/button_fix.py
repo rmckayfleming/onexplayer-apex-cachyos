@@ -1,30 +1,28 @@
-"""Button fix for OneXPlayer Apex on Bazzite.
+"""InputPlumber device profile manager for OneXPlayer Apex on CachyOS.
 
-Patches HHD (Handheld Daemon) by replacing its OXP device files with
-Apex-compatible versions. Uses bundled vanilla/patched file copies instead
-of fragile string replacement.
+Installs an InputPlumber composite device profile and capability map so
+that InputPlumber recognizes the Apex and correctly maps its buttons,
+back paddles, and special keys.
 
-Requires ostree unlock + HHD restart.
+Replaces the HHD patching approach used on Bazzite. On CachyOS, the
+gamepad daemon is InputPlumber, and device profiles live in
+/usr/share/inputplumber/devices/ and /usr/share/inputplumber/capability_maps/.
 """
 
 import hashlib
-import json
 import logging
 import os
 import shutil
 import subprocess
-import time
 
 logger = logging.getLogger("OXP-ButtonFix")
 
-# Pluggable log callbacks — set by main.py to route logs to the plugin log file.
 _log_info_cb = None
 _log_error_cb = None
 _log_warning_cb = None
 
 
 def set_log_callbacks(info_fn, error_fn, warning_fn):
-    """Set external log callbacks (called by main.py to wire into plugin logging)."""
     global _log_info_cb, _log_error_cb, _log_warning_cb
     _log_info_cb = info_fn
     _log_error_cb = error_fn
@@ -53,47 +51,25 @@ def _log_warning(msg):
 
 
 def _clean_env():
-    """Return a subprocess environment without PyInstaller's LD_LIBRARY_PATH."""
     env = os.environ.copy()
     for var in ("LD_LIBRARY_PATH", "LD_PRELOAD"):
         env.pop(var, None)
     return env
 
 
-# --- Paths ---
+# Paths
 _PLUGIN_DIR = os.path.dirname(os.path.dirname(__file__))
-PATCH_DIR = os.path.join(os.path.dirname(__file__), "hhd_patches")
-VANILLA_DIR = os.path.join(PATCH_DIR, "vanilla")
-PATCHED_DIR = os.path.join(PATCH_DIR, "patched")
+_INPUTPLUMBER_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "inputplumber")
 
-# Target HHD version these patches are built for
-HHD_VERSION = "4.1.5"
+# Source files bundled with the plugin
+_DEVICE_PROFILE_SRC = os.path.join(_INPUTPLUMBER_DIR, "50-onexplayer_apex.yaml")
+_CAPABILITY_MAP_SRC = os.path.join(_INPUTPLUMBER_DIR, "onexplayer_apex.yaml")
 
-# Files we manage
-FILES = ["const.py", "base.py", "hid_v2.py"]
+# Install targets
+_DEVICE_PROFILE_DST = "/usr/share/inputplumber/devices/50-onexplayer_apex.yaml"
+_CAPABILITY_MAP_DST = "/usr/share/inputplumber/capability_maps/onexplayer_apex.yaml"
 
-
-def _get_hhd_version():
-    """Get the installed HHD version from package metadata."""
-    try:
-        import importlib.metadata
-        return importlib.metadata.version("hhd")
-    except Exception:
-        return None
-
-
-def _find_target_dir():
-    """Locate the HHD oxp directory on the system."""
-    # Try hardcoded path first (most common on Bazzite)
-    target = "/usr/lib/python3.14/site-packages/hhd/device/oxp"
-    if os.path.isdir(target):
-        return target
-    # Fallback: search for any Python version
-    import glob as _glob
-    results = sorted(_glob.glob("/usr/lib/python3*/site-packages/hhd/device/oxp"))
-    if results:
-        return results[-1]
-    return None
+_SERVICE_NAME = "inputplumber.service"
 
 
 def _file_hash(path):
@@ -102,350 +78,189 @@ def _file_hash(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def _const_patched_hash():
-    """SHA256 hash of patched const.py."""
-    path = os.path.join(PATCHED_DIR, "const.py")
-    return _file_hash(path)
+def _files_match(src, dst):
+    """Check if installed file matches the bundled version."""
+    if not os.path.exists(dst):
+        return False
+    try:
+        return _file_hash(src) == _file_hash(dst)
+    except Exception:
+        return False
+
+
+def _inputplumber_running():
+    """Check if InputPlumber service is active."""
+    try:
+        r = subprocess.run(
+            ["systemctl", "is-active", _SERVICE_NAME],
+            capture_output=True, text=True, timeout=10, env=_clean_env()
+        )
+        return r.stdout.strip() == "active"
+    except Exception:
+        return False
 
 
 def is_applied():
-    """Check if the Apex button fix is currently applied."""
-    target_dir = _find_target_dir()
-    if not target_dir:
-        return {"applied": False, "error": "HHD oxp directory not found"}
+    """Check if the Apex InputPlumber profile is installed."""
+    profile_installed = os.path.exists(_DEVICE_PROFILE_DST)
+    capmap_installed = os.path.exists(_CAPABILITY_MAP_DST)
 
-    try:
-        for name in FILES:
-            target = os.path.join(target_dir, name)
-            patched = os.path.join(PATCHED_DIR, name)
-            if not os.path.exists(target):
-                return {"applied": False, "error": f"{name} not found at {target_dir}"}
-            if not os.path.exists(patched):
-                return {"applied": False, "error": f"Bundled patched {name} missing"}
-            if name == "const.py":
-                if _file_hash(target) != _const_patched_hash():
-                    return {"applied": False}
-            else:
-                if _file_hash(target) != _file_hash(patched):
-                    return {"applied": False}
-        result = {"applied": True}
-        # Include version info for the frontend
-        installed_ver = _get_hhd_version()
-        if installed_ver:
-            result["hhd_version"] = installed_ver
-            result["expected_hhd_version"] = HHD_VERSION
-        return result
-    except Exception as e:
-        return {"applied": False, "error": str(e)}
+    profile_current = False
+    capmap_current = False
+
+    if profile_installed and os.path.exists(_DEVICE_PROFILE_SRC):
+        profile_current = _files_match(_DEVICE_PROFILE_SRC, _DEVICE_PROFILE_DST)
+    if capmap_installed and os.path.exists(_CAPABILITY_MAP_SRC):
+        capmap_current = _files_match(_CAPABILITY_MAP_SRC, _CAPABILITY_MAP_DST)
+
+    applied = profile_installed and capmap_installed
+    ip_running = _inputplumber_running()
+
+    return {
+        "applied": applied,
+        "profile_installed": profile_installed,
+        "profile_current": profile_current,
+        "capmap_installed": capmap_installed,
+        "capmap_current": capmap_current,
+        "inputplumber_running": ip_running,
+    }
 
 
 def check_compatibility():
-    """Check if installed HHD files match our expected vanilla or patched versions.
+    """Check if InputPlumber is available on the system."""
+    ip_exists = os.path.exists("/usr/share/inputplumber/devices/")
+    capmap_dir = os.path.exists("/usr/share/inputplumber/capability_maps/")
 
-    Returns {"compatible": True} if safe to apply/revert.
-    Returns {"compatible": False, ...} if HHD version is wrong or files changed.
-    """
-    # Check HHD package version first
-    installed_ver = _get_hhd_version()
-    if installed_ver:
-        _log_info(f"Installed HHD version: {installed_ver}")
-        if installed_ver < HHD_VERSION:
-            return {
-                "compatible": False,
-                "message": (
-                    f"HHD {installed_ver} is too old. Please update to "
-                    f"HHD {HHD_VERSION} or later before applying patches. "
-                    f"Run: ujust update"
-                ),
-            }
-    else:
-        _log_warning("Could not detect HHD version — proceeding with file hash check")
-
-    target_dir = _find_target_dir()
-    if not target_dir:
-        return {"compatible": False, "message": "HHD oxp directory not found"}
-
-    for name in FILES:
-        target = os.path.join(target_dir, name)
-        vanilla = os.path.join(VANILLA_DIR, name)
-        patched = os.path.join(PATCHED_DIR, name)
-
-        if not os.path.exists(target):
-            return {"compatible": False, "file": name, "message": f"{name} not found"}
-
-        h = _file_hash(target)
-        if name == "const.py":
-            if h == _const_patched_hash():
-                continue  # already patched
-        else:
-            if h == _file_hash(patched):
-                continue  # already patched
-        if h == _file_hash(vanilla):
-            continue  # vanilla, ready to patch
+    if not ip_exists or not capmap_dir:
         return {
             "compatible": False,
-            "file": name,
-            "message": (
-                f"HHD version mismatch — {name} has been modified. "
-                f"Expected HHD {HHD_VERSION}. The system HHD may have been "
-                f"updated. Patches need to be regenerated for the new version."
-            ),
+            "message": "InputPlumber directories not found. Is InputPlumber installed?",
         }
+
+    if not os.path.exists(_DEVICE_PROFILE_SRC):
+        return {
+            "compatible": False,
+            "message": f"Bundled device profile not found at {_DEVICE_PROFILE_SRC}",
+        }
+
+    if not os.path.exists(_CAPABILITY_MAP_SRC):
+        return {
+            "compatible": False,
+            "message": f"Bundled capability map not found at {_CAPABILITY_MAP_SRC}",
+        }
+
     return {"compatible": True}
 
 
-def _is_filesystem_writable(test_path):
-    """Check if the immutable filesystem is writable."""
-    test_dir = os.path.dirname(test_path)
-    probe = os.path.join(test_dir, ".oxp_write_test")
+def _restart_inputplumber(steps):
+    """Restart InputPlumber so it picks up the new profile."""
+    _log_info("Restarting InputPlumber...")
     try:
-        with open(probe, "w") as f:
-            f.write("test")
-        os.remove(probe)
-        return True
-    except OSError:
-        return False
-
-
-def _unlock_filesystem(test_path, steps):
-    """Unlock the ostree immutable filesystem with retries."""
-    _log_info("Unlocking filesystem...")
-
-    if _is_filesystem_writable(test_path):
-        _log_info("Filesystem already writable — skipping ostree unlock")
-        steps.append("Filesystem already writable")
-        return True
-
-    try:
-        _log_info("Running: ostree admin unlock --hotfix")
         r = subprocess.run(
-            ["ostree", "admin", "unlock", "--hotfix"],
-            capture_output=True, text=True, timeout=120,
-            env=_clean_env()
+            ["systemctl", "restart", _SERVICE_NAME],
+            capture_output=True, text=True, timeout=30, env=_clean_env()
         )
-        _log_info(f"ostree unlock exit code: {r.returncode}")
-        if r.stdout.strip():
-            _log_info(f"ostree unlock stdout: {r.stdout.strip()}")
-        if r.stderr.strip():
-            _log_info(f"ostree unlock stderr: {r.stderr.strip()}")
-
         if r.returncode == 0:
-            steps.append("Unlocked filesystem")
-        else:
-            _log_warning(f"ostree unlock returned {r.returncode}: {r.stderr.strip()}")
-            steps.append(f"ostree unlock returned {r.returncode} (may already be unlocked)")
-    except subprocess.TimeoutExpired:
-        _log_error("ostree unlock timed out after 120s")
-        steps.append("ostree unlock timed out")
-        return False
-    except Exception as e:
-        _log_error(f"ostree unlock exception: {e}")
-        steps.append(f"ostree unlock failed: {e}")
-        return False
-
-    # Wait for the overlay mount to become writable (retry with backoff)
-    max_retries = 6
-    for attempt in range(1, max_retries + 1):
-        if _is_filesystem_writable(test_path):
-            _log_info(f"Filesystem writable after attempt {attempt}")
-            steps.append("Filesystem confirmed writable")
+            steps.append("Restarted InputPlumber")
+            _log_info("InputPlumber restarted")
             return True
-        wait = min(attempt * 0.5, 2.0)
-        _log_info(f"Filesystem not yet writable, waiting {wait}s (attempt {attempt}/{max_retries})...")
-        time.sleep(wait)
-
-    _log_error("Filesystem still not writable after all retries")
-    steps.append("Filesystem not writable after retries")
-    return False
-
-
-def _restart_hhd(steps):
-    """Restart all HHD service instances so they pick up new files.
-
-    Bazzite runs HHD as a per-user service (hhd@<user>) which is the instance
-    that actually holds the lock and manages the controller. The system-level
-    hhd.service may also be present. We restart all active instances.
-    """
-    _log_info("Restarting HHD...")
-    try:
-        # Find all active HHD service units (hhd.service, hhd@user.service, etc.)
-        r = subprocess.run(
-            ["systemctl", "list-units", "--plain", "--no-legend", "--type=service", "hhd*"],
-            capture_output=True, text=True, timeout=10,
-            env=_clean_env()
-        )
-        units = []
-        for line in r.stdout.strip().splitlines():
-            parts = line.split()
-            if parts:
-                units.append(parts[0])
-
-        if not units:
-            units = ["hhd"]
-            _log_warning("No active HHD units found, falling back to 'hhd'")
-
-        _log_info(f"Restarting HHD units: {units}")
-
-        success = False
-        for unit in units:
-            try:
-                r = subprocess.run(
-                    ["systemctl", "restart", unit],
-                    capture_output=True, text=True, timeout=30,
-                    env=_clean_env()
-                )
-                if r.returncode == 0:
-                    steps.append(f"Restarted {unit}")
-                    _log_info(f"{unit} restarted successfully")
-                    success = True
-                else:
-                    _log_warning(f"{unit} restart returned {r.returncode}: {r.stderr.strip()}")
-            except Exception as e:
-                _log_warning(f"{unit} restart failed: {e}")
-
-        if not success:
-            _log_error("Failed to restart any HHD service")
-            steps.append("HHD restart failed")
-        return success
+        else:
+            _log_warning(f"InputPlumber restart returned {r.returncode}: {r.stderr.strip()}")
+            # Try enabling and starting if it wasn't running
+            r2 = subprocess.run(
+                ["systemctl", "enable", "--now", _SERVICE_NAME],
+                capture_output=True, text=True, timeout=30, env=_clean_env()
+            )
+            if r2.returncode == 0:
+                steps.append("Enabled and started InputPlumber")
+                _log_info("InputPlumber enabled and started")
+                return True
+            _log_error(f"Failed to start InputPlumber: {r2.stderr.strip()}")
+            steps.append("InputPlumber restart failed")
+            return False
     except Exception as e:
-        _log_error(f"HHD restart exception: {e}")
-        steps.append("HHD restart failed")
+        _log_error(f"InputPlumber restart exception: {e}")
+        steps.append("InputPlumber restart failed")
         return False
 
 
 def apply():
-    """Apply the Apex button fix by copying patched files. Idempotent."""
+    """Install the Apex InputPlumber device profile and capability map."""
     steps = []
-
-    _log_info("=== Button Fix Apply Start ===")
+    _log_info("=== InputPlumber Profile Apply Start ===")
 
     status = is_applied()
-    if status.get("applied"):
+    if status.get("applied") and status.get("profile_current") and status.get("capmap_current"):
         return {"success": True, "message": "Already applied", "steps": ["Already applied"]}
 
-    # Check compatibility before touching anything
+    # Check compatibility
     compat = check_compatibility()
     if not compat.get("compatible"):
-        # Files don't match vanilla or patched — could be old-style string patches.
-        # Try restoring vanilla first, then re-check compatibility.
-        _log_warning(f"Compatibility check failed: {compat.get('message')}. "
-                     "Attempting to restore vanilla files first (old patch migration).")
+        return {"success": False, "error": compat.get("message"), "steps": steps}
 
-        target_dir_pre = _find_target_dir()
-        if target_dir_pre and _is_filesystem_writable(os.path.join(target_dir_pre, "const.py")):
-            migrated = True
-        elif target_dir_pre:
-            migrated = _unlock_filesystem(os.path.join(target_dir_pre, "const.py"), steps)
-        else:
-            migrated = False
-
-        if migrated and target_dir_pre:
-            try:
-                for name in FILES:
-                    src = os.path.join(VANILLA_DIR, name)
-                    dst = os.path.join(target_dir_pre, name)
-                    shutil.copy2(src, dst)
-                    _log_info(f"Migration: restored vanilla {name}")
-                steps.append("Restored vanilla files (old patch migration)")
-            except Exception as e:
-                _log_error(f"Migration restore failed: {e}")
-                migrated = False
-
-        if migrated:
-            compat = check_compatibility()
-
-        if not compat.get("compatible"):
-            msg = compat.get("message", "HHD version mismatch")
-            _log_error(f"Compatibility check failed after migration attempt: {msg}")
-            return {"success": False, "error": msg, "steps": steps}
-
-    target_dir = _find_target_dir()
-    if not target_dir:
-        return {"success": False, "error": "HHD oxp directory not found", "steps": steps}
-
-    test_path = os.path.join(target_dir, "const.py")
-
-    # Unlock immutable filesystem
-    if not _unlock_filesystem(test_path, steps):
-        return {"success": False, "error": "Filesystem is not writable. ostree unlock failed.", "steps": steps}
-
-    # Copy patched files
+    # Install device profile
     try:
-        for name in FILES:
-            src = os.path.join(PATCHED_DIR, name)
-            dst = os.path.join(target_dir, name)
-            shutil.copy2(src, dst)
-            _log_info(f"Copied patched {name}")
-            steps.append(f"Copied patched {name}")
+        shutil.copy2(_DEVICE_PROFILE_SRC, _DEVICE_PROFILE_DST)
+        _log_info(f"Installed {_DEVICE_PROFILE_DST}")
+        steps.append("Installed device profile")
     except Exception as e:
-        _log_error(f"Failed to copy files: {e}")
-        # Attempt rollback
-        _log_warning("Rolling back to vanilla...")
+        _log_error(f"Failed to install device profile: {e}")
+        return {"success": False, "error": f"Failed to install device profile: {e}", "steps": steps}
+
+    # Install capability map
+    try:
+        shutil.copy2(_CAPABILITY_MAP_SRC, _CAPABILITY_MAP_DST)
+        _log_info(f"Installed {_CAPABILITY_MAP_DST}")
+        steps.append("Installed capability map")
+    except Exception as e:
+        _log_error(f"Failed to install capability map: {e}")
+        # Rollback device profile
         try:
-            for name in FILES:
-                vanilla = os.path.join(VANILLA_DIR, name)
-                dst = os.path.join(target_dir, name)
-                if os.path.exists(vanilla):
-                    shutil.copy2(vanilla, dst)
-            steps.append("Rolled back to vanilla after error")
-        except Exception as rb_err:
-            _log_error(f"Rollback failed: {rb_err}")
-        return {"success": False, "error": f"Failed to copy files: {e}", "steps": steps}
+            os.remove(_DEVICE_PROFILE_DST)
+        except Exception:
+            pass
+        return {"success": False, "error": f"Failed to install capability map: {e}", "steps": steps}
 
-    # Restart HHD
-    if not _restart_hhd(steps):
-        return {"success": True, "warning": "Patched but HHD restart may have failed", "steps": steps}
+    # Restart InputPlumber to pick up new profile
+    if not _restart_inputplumber(steps):
+        return {"success": True, "warning": "Profile installed but InputPlumber restart may have failed", "steps": steps}
 
-    _log_info("Button fix applied successfully")
-    return {"success": True, "message": "Button fix applied and HHD restarted", "steps": steps}
+    _log_info("InputPlumber profile applied successfully")
+    return {"success": True, "message": "InputPlumber profile installed and service restarted", "steps": steps}
 
 
 def revert():
-    """Revert the Apex button fix by copying vanilla files back."""
+    """Remove the Apex InputPlumber profile and capability map."""
     steps = []
+    _log_info("=== InputPlumber Profile Revert Start ===")
 
-    _log_info("=== Button Fix Revert Start ===")
+    # Remove device profile
+    if os.path.exists(_DEVICE_PROFILE_DST):
+        try:
+            os.remove(_DEVICE_PROFILE_DST)
+            steps.append("Removed device profile")
+            _log_info(f"Removed {_DEVICE_PROFILE_DST}")
+        except Exception as e:
+            _log_warning(f"Failed to remove device profile: {e}")
+    else:
+        steps.append("Device profile not present")
 
-    target_dir = _find_target_dir()
-    if not target_dir:
-        return {"success": False, "error": "HHD oxp directory not found", "steps": steps}
+    # Remove capability map
+    if os.path.exists(_CAPABILITY_MAP_DST):
+        try:
+            os.remove(_CAPABILITY_MAP_DST)
+            steps.append("Removed capability map")
+            _log_info(f"Removed {_CAPABILITY_MAP_DST}")
+        except Exception as e:
+            _log_warning(f"Failed to remove capability map: {e}")
+    else:
+        steps.append("Capability map not present")
 
-    # Check if already vanilla
-    all_vanilla = True
-    for name in FILES:
-        target = os.path.join(target_dir, name)
-        vanilla = os.path.join(VANILLA_DIR, name)
-        if os.path.exists(target) and os.path.exists(vanilla):
-            if _file_hash(target) != _file_hash(vanilla):
-                all_vanilla = False
-                break
-    if all_vanilla:
-        return {"success": True, "message": "Already reverted (vanilla)", "steps": ["Already vanilla"]}
+    # Restart InputPlumber so it drops the Apex composite device
+    _restart_inputplumber(steps)
 
-    test_path = os.path.join(target_dir, "const.py")
-
-    # Unlock immutable filesystem
-    if not _unlock_filesystem(test_path, steps):
-        return {"success": False, "error": "Filesystem is not writable. ostree unlock failed.", "steps": steps}
-
-    # Copy vanilla files
-    try:
-        for name in FILES:
-            src = os.path.join(VANILLA_DIR, name)
-            dst = os.path.join(target_dir, name)
-            shutil.copy2(src, dst)
-            _log_info(f"Restored vanilla {name}")
-            steps.append(f"Restored vanilla {name}")
-    except Exception as e:
-        _log_error(f"Failed to restore vanilla files: {e}")
-        return {"success": False, "error": f"Failed to restore files: {e}", "steps": steps}
-
-    # Restart HHD
-    if not _restart_hhd(steps):
-        return {"success": True, "warning": "Reverted but HHD restart may have failed", "steps": steps}
-
-    _log_info("Button fix reverted successfully")
-    return {"success": True, "message": "Button fix reverted and HHD restarted", "steps": steps}
+    _log_info("InputPlumber profile reverted")
+    return {"success": True, "message": "InputPlumber profile removed", "steps": steps}
 
 
 if __name__ == "__main__":
@@ -468,21 +283,17 @@ if __name__ == "__main__":
     if cmd == "status":
         result = is_applied()
         print(_json.dumps(result, indent=2))
-
     elif cmd == "apply":
         result = apply()
         print(_json.dumps(result, indent=2))
         sys.exit(0 if result.get("success") else 1)
-
     elif cmd == "revert":
         result = revert()
         print(_json.dumps(result, indent=2))
         sys.exit(0 if result.get("success") else 1)
-
     elif cmd == "compat":
         result = check_compatibility()
         print(_json.dumps(result, indent=2))
-
     else:
         print(f"Unknown command: {cmd}")
         print(usage)

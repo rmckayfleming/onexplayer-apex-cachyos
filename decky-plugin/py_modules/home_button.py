@@ -1,12 +1,11 @@
 """Home button monitor for OneXPlayer Apex.
 
 The Apex has a Home/Orange button that sends a keyboard combo (LCtrl+LAlt+LGUI)
-via a secondary USB HID keyboard device (VID:PID 1a86:fe00). This is separate
-from the main controller — HHD doesn't see it by default.
+via a secondary USB HID keyboard device (VID:PID 1a86:fe00).
 
-This module watches the raw HID reports from that keyboard device via
-/dev/hidraw* and launches hhd-ui (the Handheld Daemon web UI) when the
-Home button is pressed.
+On CachyOS with InputPlumber, the Home button is handled by the capability map
+(mapped to QuickAccess). This monitor is kept as a fallback / standalone option
+for cases where InputPlumber is not managing the device.
 
 HID report format (8 bytes):
   Byte 0: Modifier keys bitmask (LCtrl=0x01, LShift=0x02, LAlt=0x04, LGUI=0x08, ...)
@@ -70,45 +69,24 @@ MOD_HOME_BUTTON = 0x0D
 DEBOUNCE_SECS = 2.0
 
 
-def _toggle_hhd_overlay():
-    """Toggle HHD overlay via its REST API.
+def _toggle_steam_overlay():
+    """Send Steam overlay toggle via xdotool.
 
-    Reads the auth token from /tmp/hhd/token and sends a POST to the
-    local HHD API. This works as root since it's a localhost HTTP call,
-    no display server access needed.
+    Sends Super+G which Steam picks up as the QAM toggle on CachyOS/SteamOS.
+    This is a fallback — InputPlumber's capability map handles this natively.
     """
-    import json
-    import urllib.request
-    import urllib.error
+    import subprocess
 
-    token_path = "/tmp/hhd/token"
     try:
-        with open(token_path) as f:
-            token = f.read().strip()
+        subprocess.run(
+            ["xdotool", "key", "super+g"],
+            capture_output=True, timeout=5,
+        )
+        _log_info("Steam overlay toggle sent via xdotool")
     except FileNotFoundError:
-        _log_error(f"HHD token not found at {token_path}")
-        return
-
-    # Use the state endpoint to toggle the overlay
-    url = "http://localhost:5335/api/v1/state"
-    payload = json.dumps({"shortcuts": {"open_hhd": True}}).encode()
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        resp = urllib.request.urlopen(req, timeout=5)
-        _log_info(f"HHD overlay toggle: HTTP {resp.status}")
-    except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")[:200]
-        _log_error(f"HHD API error {e.code}: {body}")
+        _log_warning("xdotool not found — cannot toggle overlay")
     except Exception as e:
-        _log_error(f"HHD API request failed: {e}")
+        _log_error(f"Failed to toggle overlay: {e}")
 
 
 def find_hidraw_device():
@@ -196,9 +174,9 @@ class HomeButtonMonitor:
                             if now - last_trigger < DEBOUNCE_SECS:
                                 continue
                             last_trigger = now
-                            _log_info("Home button pressed — toggling HHD overlay")
+                            _log_info("Home button pressed — toggling overlay")
                             try:
-                                _toggle_hhd_overlay()
+                                _toggle_steam_overlay()
                             except Exception as e:
                                 _log_error(f"Failed to toggle overlay: {e}")
                 finally:

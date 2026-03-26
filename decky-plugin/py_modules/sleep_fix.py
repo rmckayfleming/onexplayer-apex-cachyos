@@ -1,16 +1,15 @@
-"""Light sleep (s2idle) kargs manager for OneXPlayer Apex on Bazzite.
+"""Light sleep (s2idle) kargs manager for OneXPlayer Apex on CachyOS.
 
 Light sleep works on Strix Halo when "ACPI Auto configuration" is enabled
 in the BIOS. This module applies the required kernel parameters and removes
 any known-problematic legacy kargs from previous fix attempts.
 
-IMPORTANT: rpm-ostree kargs creates a new ostree deployment. Any hotfix
-overlay (e.g. button fix patches) will be lost on reboot. Re-apply the
-button fix after rebooting.
+Uses systemd-boot via /etc/kernel/cmdline and reinstall-kernels.
 """
 
 import logging
 import os
+import shutil
 import subprocess
 
 logger = logging.getLogger("OXP-SleepFix")
@@ -56,6 +55,8 @@ def _clean_env():
     return env
 
 
+_CMDLINE_PATH = "/etc/kernel/cmdline"
+
 # Kargs that enable light sleep (s2idle)
 LIGHT_SLEEP_KARGS = [
     "mem_sleep_default=s2idle",
@@ -80,6 +81,34 @@ def _read_cmdline():
         return ""
 
 
+def _read_kernel_cmdline_file():
+    """Read the persistent kernel cmdline from /etc/kernel/cmdline."""
+    try:
+        with open(_CMDLINE_PATH) as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def _write_kernel_cmdline(content):
+    """Write updated kernel cmdline and regenerate boot entries."""
+    # Back up existing file
+    if os.path.exists(_CMDLINE_PATH):
+        shutil.copy2(_CMDLINE_PATH, _CMDLINE_PATH + ".bak")
+
+    with open(_CMDLINE_PATH, "w") as f:
+        f.write(content + "\n")
+
+    # Regenerate boot entries with new cmdline
+    r = subprocess.run(
+        ["reinstall-kernels"],
+        capture_output=True, text=True, timeout=120,
+        env=_clean_env()
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"reinstall-kernels failed: {r.stderr.strip()}")
+
+
 def get_status():
     """Check light sleep kargs and problematic legacy kargs."""
     cmdline = _read_cmdline()
@@ -102,27 +131,33 @@ def get_status():
 def apply():
     """Apply light sleep kargs and remove problematic legacy kargs.
 
-    Uses a single rpm-ostree kargs call to minimize deployment churn.
+    Edits /etc/kernel/cmdline and runs reinstall-kernels for systemd-boot.
     """
     cmdline = _read_cmdline()
     steps = []
+    changes_needed = False
 
     _log_info("=== Light Sleep Apply Start ===")
 
-    # Build rpm-ostree kargs command with all changes at once
-    args = ["rpm-ostree", "kargs"]
+    # Read the persistent cmdline file (what systemd-boot uses)
+    persistent = _read_kernel_cmdline_file()
+    params = persistent.split()
 
+    # Add missing sleep kargs
     for karg in LIGHT_SLEEP_KARGS:
-        if karg not in cmdline:
-            args.append(f"--append={karg}")
+        if karg not in persistent:
+            params.append(karg)
             steps.append(f"Adding {karg}")
+            changes_needed = True
 
+    # Remove problematic kargs
     for karg in PROBLEMATIC_KARGS:
-        if karg in cmdline:
-            args.append(f"--delete={karg}")
+        if karg in persistent:
+            params = [p for p in params if p != karg]
             steps.append(f"Removing {karg}")
+            changes_needed = True
 
-    if len(args) == 2:
+    if not changes_needed:
         _log_info("Light sleep kargs already correct, no changes needed")
         return {
             "success": True,
@@ -131,29 +166,15 @@ def apply():
             "steps": ["All kargs already correct"],
         }
 
-    _log_info(f"Running: {' '.join(args)}")
+    new_cmdline = " ".join(params)
+    _log_info(f"New cmdline: {new_cmdline}")
+
     try:
-        r = subprocess.run(
-            args, capture_output=True, text=True, timeout=60,
-            env=_clean_env()
-        )
-        if r.returncode != 0:
-            error_msg = r.stderr.strip() or "Unknown error"
-            _log_error(f"rpm-ostree kargs failed: {error_msg}")
-            return {
-                "success": False,
-                "error": f"rpm-ostree kargs failed: {error_msg}",
-                "steps": steps,
-            }
-    except subprocess.TimeoutExpired:
-        _log_error("rpm-ostree kargs timed out")
-        return {
-            "success": False,
-            "error": "rpm-ostree kargs timed out (60s)",
-            "steps": steps,
-        }
+        _write_kernel_cmdline(new_cmdline)
+        steps.append("Updated /etc/kernel/cmdline")
+        steps.append("Regenerated boot entries")
     except Exception as e:
-        _log_error(f"rpm-ostree kargs exception: {e}")
+        _log_error(f"Failed to update kernel cmdline: {e}")
         return {
             "success": False,
             "error": str(e),
@@ -161,7 +182,6 @@ def apply():
         }
 
     msg = "Light sleep kargs applied. Reboot required."
-    msg += " Note: button fix patches will need to be re-applied after reboot."
     _log_info(f"Light sleep apply complete: {msg}")
     return {
         "success": True,
@@ -173,19 +193,21 @@ def apply():
 
 def revert():
     """Remove light sleep kargs."""
-    cmdline = _read_cmdline()
     steps = []
+    changes_needed = False
 
     _log_info("=== Light Sleep Revert Start ===")
 
-    args = ["rpm-ostree", "kargs"]
+    persistent = _read_kernel_cmdline_file()
+    params = persistent.split()
 
     for karg in LIGHT_SLEEP_KARGS:
-        if karg in cmdline:
-            args.append(f"--delete={karg}")
+        if karg in persistent:
+            params = [p for p in params if p != karg]
             steps.append(f"Removing {karg}")
+            changes_needed = True
 
-    if len(args) == 2:
+    if not changes_needed:
         _log_info("No light sleep kargs to remove")
         return {
             "success": True,
@@ -194,22 +216,15 @@ def revert():
             "steps": ["No kargs to remove"],
         }
 
-    _log_info(f"Running: {' '.join(args)}")
+    new_cmdline = " ".join(params)
+    _log_info(f"New cmdline: {new_cmdline}")
+
     try:
-        r = subprocess.run(
-            args, capture_output=True, text=True, timeout=60,
-            env=_clean_env()
-        )
-        if r.returncode != 0:
-            error_msg = r.stderr.strip() or "Unknown error"
-            _log_error(f"rpm-ostree kargs failed: {error_msg}")
-            return {
-                "success": False,
-                "error": f"rpm-ostree kargs failed: {error_msg}",
-                "steps": steps,
-            }
+        _write_kernel_cmdline(new_cmdline)
+        steps.append("Updated /etc/kernel/cmdline")
+        steps.append("Regenerated boot entries")
     except Exception as e:
-        _log_error(f"rpm-ostree kargs exception: {e}")
+        _log_error(f"Failed to update kernel cmdline: {e}")
         return {
             "success": False,
             "error": str(e),
@@ -217,7 +232,6 @@ def revert():
         }
 
     msg = "Light sleep kargs removed. Reboot required."
-    msg += " Note: button fix patches will need to be re-applied after reboot."
     _log_info(f"Light sleep revert complete: {msg}")
     return {
         "success": True,
