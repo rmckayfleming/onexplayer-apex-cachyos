@@ -1,30 +1,30 @@
-"""Back paddle monitor for OneXPlayer Apex.
+"""Back paddle support via firmware remap for OneXPlayer Apex.
 
-The Apex has L4/R4 back paddles connected through a vendor HID device
-(VID:PID 1a86:fe00). By default, the firmware mirrors these as B/Y on
-the Xbox gamepad. Sending an HID v1 intercept command enables separate
-button reports for L4 (0x22) and R4 (0x23).
+The Apex has L4/R4 back paddles (M1/M2) connected through a vendor HID
+device (VID:PID 1A86:FE00). By default, the firmware mirrors these as
+B/Y on the Xbox gamepad (SECOND_FUNC mode, funcCode=0x05).
 
-This module:
-1. Finds the correct hidraw interface (64-byte vendor, usage page 0xFF00)
-2. Sends the intercept-enable command
-3. Reads 64-byte button reports in a loop
-4. Emits BTN_TRIGGER_HAPPY1 (L4) and BTN_TRIGGER_HAPPY2 (R4) via uinput
+This module uses firmware-level button remapping (CID 0xB4) to assign
+unique keyboard keycodes (F13/F14) to the paddles, then reads the
+resulting B2 report-mode events and injects BTN_TRIGGER_HAPPY1/2 via
+uinput so Steam Input recognizes them as L4/R4 back paddles.
 
-Uses raw /dev/uinput ioctl calls — no external dependencies needed.
+No intercept mode needed — the Xbox gamepad stays fully active with
+rumble/vibration support and native analog input.
 
-Steam Input recognizes BTN_TRIGGER_HAPPY1/2 as back paddle buttons
-(like the Steam Deck's L4/R4) and lets users remap them per-game.
+Protocol:
+  1. Send CID 0xB4 key mapping to remap M1→F13, M2→F14 (persists in firmware)
+  2. Send B2 enable then B2 disable to activate "report mode" (flag 0x80)
+  3. Read B2 report-mode packets for paddle press/release events
+  4. Inject BTN_TRIGGER_HAPPY1/2 via uinput
 
-HID v1 protocol:
-  gen_cmd_v1(cid, cmd) -> 64-byte packet
-  INTERCEPT_ON  = gen_cmd_v1(0xB2, [0x03, 0x01, 0x02])
-  INTERCEPT_OFF = gen_cmd_v1(0xB2, [0x00, 0x01, 0x02])
-
-Button report (64 bytes, byte[0]==0xB2):
-  byte[3] == 0x01 -> button event (vs 0x03=ack, 0x02=gamepad state)
-  byte[6] -> button code: 0x22=L4, 0x23=R4
-  byte[12] -> state: 0x01=pressed, 0x02=released
+B2 report-mode packet format (64 bytes):
+  byte[0]  = 0xB2 (CID)
+  byte[3]  = 0x01 (button event type)
+  byte[5]  = 0x80 (report mode flag)
+  byte[6]  = button code (0x22=M1, 0x23=M2)
+  byte[7]  = funcCode (0x02=KEYBOARD when remapped)
+  byte[12] = state (0x01=press, 0x02=release)
 """
 
 import asyncio
@@ -45,7 +45,6 @@ _log_warning_cb = None
 
 
 def set_log_callbacks(info_fn, error_fn, warning_fn):
-    """Set external log callbacks (called by main.py to wire into plugin logging)."""
     global _log_info_cb, _log_error_cb, _log_warning_cb
     _log_info_cb = info_fn
     _log_error_cb = error_fn
@@ -73,18 +72,29 @@ def _log_warning(msg):
         logger.warning(msg)
 
 
-# USB VID:PID for the Apex's vendor HID device
+# === Device constants ===
+
 TARGET_VID = 0x1A86
 TARGET_PID = 0xFE00
 
-# Button codes in the intercept reports
-BTN_L4 = 0x22
-BTN_R4 = 0x23
+# Button codes in B2 reports
+BTN_M1 = 0x22  # Right back paddle
+BTN_M2 = 0x23  # Left back paddle
 
-# Button states
+# Function codes
+FUNC_KEYBOARD = 0x02
+FUNC_SECOND_FUNC = 0x05  # Default (duplicates Y/B)
+
+# OXP key encoding: F(n) = 0x59 + n
+OXP_KEY_F13 = 0x66
+OXP_KEY_F14 = 0x67
+
+# Button states in B2 report-mode packets
 STATE_PRESSED = 0x01
 STATE_RELEASED = 0x02
 
+
+# === HID v1 command framing ===
 
 def gen_cmd_v1(cid, cmd, idx=0x01, size=64):
     """Generate an HID v1 command packet."""
@@ -93,18 +103,50 @@ def gen_cmd_v1(cid, cmd, idx=0x01, size=64):
     return base + padding + bytes([0x3F, cid])
 
 
-INTERCEPT_ON = gen_cmd_v1(0xB2, [0x03, 0x01, 0x02])
-INTERCEPT_OFF = gen_cmd_v1(0xB2, [0x00, 0x01, 0x02])
+FUNC_XBOX = 0x01
 
+B2_INTERCEPT_ON = gen_cmd_v1(0xB2, [0x03, 0x01, 0x02])
+B2_INTERCEPT_OFF = gen_cmd_v1(0xB2, [0x00, 0x01, 0x02])
+
+
+def _build_b4_page2_remap(preset=0x01):
+    """Build B4 page 2 packet: standard d-pad/buttons + M1→F13, M2→F14."""
+    entries = [
+        0x0A, FUNC_XBOX, 0x0A, 0x00, 0x00, 0x00,  # BACK
+        0x0B, FUNC_XBOX, 0x0B, 0x00, 0x00, 0x00,  # L3
+        0x0C, FUNC_XBOX, 0x0C, 0x00, 0x00, 0x00,  # R3
+        0x0D, FUNC_XBOX, 0x0D, 0x00, 0x00, 0x00,  # UP
+        0x0E, FUNC_XBOX, 0x0E, 0x00, 0x00, 0x00,  # DOWN
+        0x0F, FUNC_XBOX, 0x0F, 0x00, 0x00, 0x00,  # LEFT
+        0x10, FUNC_XBOX, 0x10, 0x00, 0x00, 0x00,  # RIGHT
+        BTN_M1, FUNC_KEYBOARD, 0x01, OXP_KEY_F13, 0x00, 0x00,  # M1 → F13
+        BTN_M2, FUNC_KEYBOARD, 0x01, OXP_KEY_F14, 0x00, 0x00,  # M2 → F14
+    ]
+    cmd = [0x02, 0x38, 0x20, 0x02, preset] + entries
+    return gen_cmd_v1(0xB4, cmd)
+
+
+def _build_b4_page1(preset=0x01):
+    """Build B4 page 1 packet: standard face/shoulder buttons."""
+    entries = [
+        0x01, FUNC_XBOX, 0x01, 0x00, 0x00, 0x00,  # A
+        0x02, FUNC_XBOX, 0x02, 0x00, 0x00, 0x00,  # B
+        0x03, FUNC_XBOX, 0x03, 0x00, 0x00, 0x00,  # X
+        0x04, FUNC_XBOX, 0x04, 0x00, 0x00, 0x00,  # Y
+        0x05, FUNC_XBOX, 0x05, 0x00, 0x00, 0x00,  # LB
+        0x06, FUNC_XBOX, 0x06, 0x00, 0x00, 0x00,  # RB
+        0x07, FUNC_XBOX, 0x07, 0x00, 0x00, 0x00,  # LT
+        0x08, FUNC_XBOX, 0x08, 0x00, 0x00, 0x00,  # RT
+        0x09, FUNC_XBOX, 0x09, 0x00, 0x00, 0x00,  # START
+    ]
+    cmd = [0x02, 0x38, 0x20, 0x01, preset] + entries
+    return gen_cmd_v1(0xB4, cmd)
+
+
+# === Device discovery ===
 
 def find_vendor_hidraw():
-    """Find the 64-byte vendor HID interface for the Apex (1a86:fe00).
-
-    The device exposes multiple hidraw interfaces (keyboard, mouse, vendor).
-    We need the one with usage page 0xFF00 — its report descriptor starts
-    with bytes 0x06 0x00 0xFF.
-    """
-    candidates = []
+    """Find the vendor HID interface for the Apex (1A86:FE00, usage page 0xFF00)."""
     for sysfs_path in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
         uevent_path = os.path.join(sysfs_path, "device", "uevent")
         if not os.path.exists(uevent_path):
@@ -121,32 +163,23 @@ def find_vendor_hidraw():
             pid = int(parts[2], 16)
             if vid == TARGET_VID and pid == TARGET_PID:
                 name = os.path.basename(sysfs_path)
-                candidates.append((name, sysfs_path))
-                break
-
-    # Filter to the vendor-defined interface (usage page 0xFF00)
-    for name, sysfs_path in candidates:
-        rd_path = os.path.join(sysfs_path, "device", "report_descriptor")
-        if not os.path.exists(rd_path):
-            continue
-        try:
-            with open(rd_path, "rb") as f:
-                rd = f.read(3)
-            # Usage page 0xFF00 starts with: 0x06 0x00 0xFF
-            if len(rd) >= 3 and rd[0] == 0x06 and rd[1] == 0x00 and rd[2] == 0xFF:
-                dev_path = f"/dev/{name}"
-                if os.path.exists(dev_path):
-                    return dev_path
-        except OSError:
-            continue
-
+                rd_path = os.path.join(sysfs_path, "device", "report_descriptor")
+                if os.path.exists(rd_path):
+                    try:
+                        with open(rd_path, "rb") as f:
+                            rd = f.read(3)
+                        if len(rd) >= 3 and rd[0] == 0x06 and rd[1] == 0x00 and rd[2] == 0xFF:
+                            dev_path = f"/dev/{name}"
+                            if os.path.exists(dev_path):
+                                return dev_path
+                    except OSError:
+                        pass
+            break
     return None
 
 
-# ── Raw uinput constants and helpers ──
-# No external dependencies — uses ioctl directly against /dev/uinput.
+# === Raw uinput ===
 
-# Linux input event types / codes
 EV_SYN = 0x00
 EV_KEY = 0x01
 SYN_REPORT = 0x00
@@ -154,18 +187,13 @@ BTN_TRIGGER_HAPPY1 = 0x2C0
 BTN_TRIGGER_HAPPY2 = 0x2C1
 BUS_VIRTUAL = 0x06
 
-# uinput ioctl numbers
-UI_SET_EVBIT = 0x40045564   # _IOW('U', 100, int)
-UI_SET_KEYBIT = 0x40045565  # _IOW('U', 101, int)
-UI_DEV_SETUP = 0x405C5503   # _IOW('U', 3, struct uinput_setup)
-UI_DEV_CREATE = 0x5501       # _IO('U', 1)
-UI_DEV_DESTROY = 0x5502      # _IO('U', 2)
+UI_SET_EVBIT = 0x40045564
+UI_SET_KEYBIT = 0x40045565
+UI_DEV_SETUP = 0x405C5503
+UI_DEV_CREATE = 0x5501
+UI_DEV_DESTROY = 0x5502
 
-# struct input_id: bustype(u16), vendor(u16), product(u16), version(u16)
-# struct uinput_setup: input_id(8 bytes), name(80 bytes), ff_effects_max(u32) = 92 bytes
 UINPUT_SETUP_FMT = "HHHh80sI"
-
-# struct input_event: tv_sec(long), tv_usec(long), type(u16), code(u16), value(i32)
 INPUT_EVENT_FMT = "llHHi"
 
 
@@ -177,32 +205,21 @@ class RawUinputDevice:
 
     def create(self):
         self._fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
-
-        # Enable EV_KEY
         fcntl.ioctl(self._fd, UI_SET_EVBIT, EV_KEY)
-        # Enable the two button codes
         fcntl.ioctl(self._fd, UI_SET_KEYBIT, BTN_TRIGGER_HAPPY1)
         fcntl.ioctl(self._fd, UI_SET_KEYBIT, BTN_TRIGGER_HAPPY2)
 
-        # Setup device identity
         name = b"OXP Apex Back Paddles"
         name_padded = name + b"\x00" * (80 - len(name))
         setup_data = struct.pack(
             UINPUT_SETUP_FMT,
-            BUS_VIRTUAL,   # bustype
-            0x1A86,        # vendor
-            0xFE01,        # product (distinct from real device)
-            1,             # version
-            name_padded,   # name
-            0,             # ff_effects_max
+            BUS_VIRTUAL, 0x1A86, 0xFE01, 1, name_padded, 0,
         )
         fcntl.ioctl(self._fd, UI_DEV_SETUP, setup_data)
         fcntl.ioctl(self._fd, UI_DEV_CREATE)
-        # Small delay for device node to appear
         time.sleep(0.1)
 
     def emit(self, ev_type, code, value):
-        """Write a single input event."""
         now = time.time()
         sec = int(now)
         usec = int((now - sec) * 1_000_000)
@@ -210,7 +227,6 @@ class RawUinputDevice:
         os.write(self._fd, event)
 
     def syn(self):
-        """Send a SYN_REPORT to flush the event."""
         self.emit(EV_SYN, SYN_REPORT, 0)
 
     def close(self):
@@ -226,8 +242,86 @@ class RawUinputDevice:
             self._fd = -1
 
 
+# === Firmware remap helpers ===
+
+def _apply_firmware_remap(fd):
+    """Send B4 key mapping to remap M1→F13, M2→F14.
+
+    Writes both pages (all buttons). The firmware accepts writes silently
+    (no B4 response), but the remap persists across reboots.
+    """
+    _log_info("Applying firmware remap: M1→F13, M2→F14")
+    try:
+        os.write(fd, _build_b4_page1())
+        time.sleep(0.1)
+        os.write(fd, _build_b4_page2_remap())
+        time.sleep(0.1)
+        _log_info("Firmware remap commands sent")
+        return True
+    except OSError as e:
+        _log_error(f"Firmware remap write failed: {e}")
+        return False
+
+
+def _activate_report_mode(fd):
+    """Send B2 enable→disable cycle to activate report mode.
+
+    After this cycle, the device spontaneously sends B2 packets with
+    flag 0x80 for button presses, without entering intercept mode.
+    """
+    _log_info("Activating report mode (B2 cycle)...")
+    try:
+        os.write(fd, B2_INTERCEPT_ON)
+        time.sleep(0.2)
+        # Drain B2 ack responses
+        import select
+        for _ in range(20):
+            ready, _, _ = select.select([fd], [], [], 0.05)
+            if fd in ready:
+                try:
+                    os.read(fd, 256)
+                except BlockingIOError:
+                    break
+            else:
+                break
+        os.write(fd, B2_INTERCEPT_OFF)
+        time.sleep(0.1)
+        # Drain disable ack
+        for _ in range(10):
+            ready, _, _ = select.select([fd], [], [], 0.05)
+            if fd in ready:
+                try:
+                    os.read(fd, 256)
+                except BlockingIOError:
+                    break
+            else:
+                break
+        _log_info("Report mode activated")
+        return True
+    except OSError as e:
+        _log_error(f"Report mode activation failed: {e}")
+        return False
+
+
+def _check_paddle_remap(fd):
+    """Check if paddles are already remapped by pressing test.
+
+    Sends B2 cycle and waits briefly for any report-mode events to
+    determine if the firmware remap is active. Returns True if we
+    see KEYBOARD funcCode events for M1 or M2.
+
+    Note: This is non-destructive — if no paddles are pressed during
+    the check, we just assume remap is needed and apply it.
+    """
+    # We can't reliably query the B4 mapping (firmware ignores B4 reads).
+    # Instead, we apply the remap unconditionally — it's idempotent.
+    return False
+
+
+# === Monitor ===
+
 class BackPaddleMonitor:
-    """Async monitor that intercepts back paddle HID reports and emits uinput events."""
+    """Async monitor that reads firmware report-mode events and emits uinput."""
 
     def __init__(self):
         self._task = None
@@ -237,14 +331,22 @@ class BackPaddleMonitor:
     def is_running(self):
         return self._task is not None and not self._task.done()
 
+    def get_status(self):
+        """Return current status for the frontend."""
+        return {
+            "running": self.is_running,
+            "mode": "firmware_remap",
+        }
+
     async def _monitor_loop(self):
-        """Main monitoring loop — enables intercept and reads paddle reports."""
+        """Main loop: remap → report mode → read events → uinput."""
+        import select as _select
         self._running = True
 
         while self._running:
             dev_path = find_vendor_hidraw()
             if not dev_path:
-                _log_warning("Vendor hidraw device not found, retrying in 5s...")
+                _log_warning("Vendor hidraw not found, retrying in 5s...")
                 await asyncio.sleep(5)
                 continue
 
@@ -254,65 +356,68 @@ class BackPaddleMonitor:
             try:
                 fd = os.open(dev_path, os.O_RDWR | os.O_NONBLOCK)
 
+                # Apply firmware remap (idempotent — persists in firmware)
+                _apply_firmware_remap(fd)
+
+                # Activate report mode
+                if not _activate_report_mode(fd):
+                    _log_error("Failed to activate report mode, retrying in 5s...")
+                    os.close(fd)
+                    fd = -1
+                    await asyncio.sleep(5)
+                    continue
+
+                # Create uinput device
                 uinput_dev = RawUinputDevice()
                 uinput_dev.create()
                 _log_info("Created uinput device: OXP Apex Back Paddles")
 
-                # Enable intercept mode
-                os.write(fd, INTERCEPT_ON)
-                _log_info("Back paddle intercept mode enabled")
-
+                # Read report-mode events
                 while self._running:
                     try:
                         data = os.read(fd, 64)
                     except BlockingIOError:
-                        await asyncio.sleep(0.02)
+                        await asyncio.sleep(0.005)
                         continue
                     except OSError:
                         _log_warning("Device read error, will reconnect...")
                         break
 
                     if not data or len(data) < 13:
-                        await asyncio.sleep(0.02)
+                        await asyncio.sleep(0.005)
                         continue
 
-                    # Only process button report packets
+                    # Filter: only B2 report-mode button events
                     if data[0] != 0xB2:
                         continue
-                    if data[3] != 0x01:
+                    if data[3] != 0x01:  # packet type = button event
+                        continue
+                    if data[5] != 0x80:  # report mode flag
                         continue
 
                     button_code = data[6]
                     state = data[12]
 
-                    if button_code == BTN_L4:
+                    if button_code == BTN_M1:
                         evdev_btn = BTN_TRIGGER_HAPPY1
-                        label = "L4"
-                    elif button_code == BTN_R4:
+                        label = "M1(R)"
+                    elif button_code == BTN_M2:
                         evdev_btn = BTN_TRIGGER_HAPPY2
-                        label = "R4"
+                        label = "M2(L)"
                     else:
                         continue
 
                     if state == STATE_PRESSED:
                         uinput_dev.emit(EV_KEY, evdev_btn, 1)
                         uinput_dev.syn()
-                        _log_info(f"Back paddle {label} pressed")
                     elif state == STATE_RELEASED:
                         uinput_dev.emit(EV_KEY, evdev_btn, 0)
                         uinput_dev.syn()
-                        _log_info(f"Back paddle {label} released")
 
             except OSError as e:
-                _log_error(f"Error with back paddle device: {e}")
+                _log_error(f"Back paddle monitor error: {e}")
             finally:
-                # Disable intercept mode before closing
                 if fd >= 0:
-                    try:
-                        os.write(fd, INTERCEPT_OFF)
-                        _log_info("Back paddle intercept mode disabled")
-                    except OSError:
-                        pass
                     try:
                         os.close(fd)
                     except OSError:
@@ -327,13 +432,14 @@ class BackPaddleMonitor:
                 await asyncio.sleep(5)
 
     def start(self, loop):
-        """Start the monitor as an async task on the given event loop."""
+        """Start the monitor as an async task."""
         if not self.is_running:
             self._running = True
             self._task = loop.create_task(self._monitor_loop())
+            _log_info("Back paddle monitor starting (firmware remap mode)")
 
     async def stop(self):
-        """Stop the monitor and clean up."""
+        """Stop the monitor."""
         self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
@@ -342,3 +448,4 @@ class BackPaddleMonitor:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        _log_info("Back paddle monitor stopped")

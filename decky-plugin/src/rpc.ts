@@ -7,7 +7,6 @@ export const revertButtonFix = callable<[], FixResult>("revert_button_fix");
 export const applyLightSleep = callable<[], FixResult>("apply_light_sleep");
 export const revertLightSleep = callable<[], FixResult>("revert_light_sleep");
 export const saveLogs = callable<[], { success: boolean; path?: string; error?: string }>("save_logs");
-export const setInterceptMode = callable<[boolean], FixResult>("set_intercept_mode");
 export const enableSpeakerDSP = callable<[string], FixResult>("enable_speaker_dsp");
 export const disableSpeakerDSP = callable<[], FixResult>("disable_speaker_dsp");
 export const setDSPProfile = callable<[string], FixResult>("set_dsp_profile");
