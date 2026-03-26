@@ -1,22 +1,21 @@
-"""Back paddle support via firmware remap for OneXPlayer Apex.
+"""Back paddle setup via firmware remap for OneXPlayer Apex.
 
 The Apex has L4/R4 back paddles (M1/M2) connected through a vendor HID
 device (VID:PID 1A86:FE00). By default, the firmware mirrors these as
 B/Y on the Xbox gamepad (SECOND_FUNC mode, funcCode=0x05).
 
 This module uses firmware-level button remapping (CID 0xB4) to assign
-unique keyboard keycodes (F13/F14) to the paddles, then reads the
-resulting B2 report-mode events and injects BTN_TRIGGER_HAPPY1/2 via
-uinput so Steam Input recognizes them as L4/R4 back paddles.
+unique keyboard keycodes (F13/F14) to the paddles, then activates
+"report mode" so HHD can read the paddle events natively on its virtual
+gamepad (extra_l1/extra_r1). No separate uinput device needed.
 
-No intercept mode needed — the Xbox gamepad stays fully active with
+No intercept mode — the Xbox gamepad stays fully active with
 rumble/vibration support and native analog input.
 
 Protocol:
   1. Send CID 0xB4 key mapping to remap M1→F14, M2→F13 (persists in firmware)
   2. Send B2 enable then B2 disable to activate "report mode" (flag 0x80)
-  3. Read B2 report-mode packets for paddle press/release events
-  4. Inject BTN_TRIGGER_HAPPY1/2 via uinput
+  3. HHD reads B2 report-mode packets and maps M1/M2 → extra_r1/extra_l1
 
 B2 report-mode packet format (64 bytes):
   byte[0]  = 0xB2 (CID)
@@ -28,12 +27,9 @@ B2 report-mode packet format (64 bytes):
 """
 
 import asyncio
-import ctypes
-import fcntl
 import glob
 import logging
 import os
-import struct
 import time
 
 logger = logging.getLogger("OXP-BackPaddle")
@@ -88,10 +84,6 @@ FUNC_SECOND_FUNC = 0x05  # Default (duplicates Y/B)
 # OXP key encoding: F(n) = 0x59 + n
 OXP_KEY_F13 = 0x66
 OXP_KEY_F14 = 0x67
-
-# Button states in B2 report-mode packets
-STATE_PRESSED = 0x01
-STATE_RELEASED = 0x02
 
 
 # === HID v1 command framing ===
@@ -178,70 +170,6 @@ def find_vendor_hidraw():
     return None
 
 
-# === Raw uinput ===
-
-EV_SYN = 0x00
-EV_KEY = 0x01
-SYN_REPORT = 0x00
-BTN_TRIGGER_HAPPY1 = 0x2C0
-BTN_TRIGGER_HAPPY2 = 0x2C1
-BUS_VIRTUAL = 0x06
-
-UI_SET_EVBIT = 0x40045564
-UI_SET_KEYBIT = 0x40045565
-UI_DEV_SETUP = 0x405C5503
-UI_DEV_CREATE = 0x5501
-UI_DEV_DESTROY = 0x5502
-
-UINPUT_SETUP_FMT = "HHHh80sI"
-INPUT_EVENT_FMT = "llHHi"
-
-
-class RawUinputDevice:
-    """Minimal uinput wrapper using raw ioctl — no python-evdev needed."""
-
-    def __init__(self):
-        self._fd = -1
-
-    def create(self):
-        self._fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
-        fcntl.ioctl(self._fd, UI_SET_EVBIT, EV_KEY)
-        fcntl.ioctl(self._fd, UI_SET_KEYBIT, BTN_TRIGGER_HAPPY1)
-        fcntl.ioctl(self._fd, UI_SET_KEYBIT, BTN_TRIGGER_HAPPY2)
-
-        name = b"OXP Apex Back Paddles"
-        name_padded = name + b"\x00" * (80 - len(name))
-        setup_data = struct.pack(
-            UINPUT_SETUP_FMT,
-            BUS_VIRTUAL, 0x1A86, 0xFE01, 1, name_padded, 0,
-        )
-        fcntl.ioctl(self._fd, UI_DEV_SETUP, setup_data)
-        fcntl.ioctl(self._fd, UI_DEV_CREATE)
-        time.sleep(0.1)
-
-    def emit(self, ev_type, code, value):
-        now = time.time()
-        sec = int(now)
-        usec = int((now - sec) * 1_000_000)
-        event = struct.pack(INPUT_EVENT_FMT, sec, usec, ev_type, code, value)
-        os.write(self._fd, event)
-
-    def syn(self):
-        self.emit(EV_SYN, SYN_REPORT, 0)
-
-    def close(self):
-        if self._fd >= 0:
-            try:
-                fcntl.ioctl(self._fd, UI_DEV_DESTROY)
-            except OSError:
-                pass
-            try:
-                os.close(self._fd)
-            except OSError:
-                pass
-            self._fd = -1
-
-
 # === Firmware remap helpers ===
 
 def _apply_firmware_remap(fd):
@@ -303,144 +231,82 @@ def _activate_report_mode(fd):
         return False
 
 
-def _check_paddle_remap(fd):
-    """Check if paddles are already remapped by pressing test.
+# === One-shot setup ===
 
-    Sends B2 cycle and waits briefly for any report-mode events to
-    determine if the firmware remap is active. Returns True if we
-    see KEYBOARD funcCode events for M1 or M2.
+def setup_paddles():
+    """Apply firmware remap and activate report mode (one-shot).
 
-    Note: This is non-destructive — if no paddles are pressed during
-    the check, we just assume remap is needed and apply it.
+    After this, HHD reads paddle events natively via its virtual gamepad.
+    Returns dict with success/error status.
     """
-    # We can't reliably query the B4 mapping (firmware ignores B4 reads).
-    # Instead, we apply the remap unconditionally — it's idempotent.
-    return False
+    dev_path = find_vendor_hidraw()
+    if not dev_path:
+        return {"success": False, "error": "Vendor hidraw not found"}
 
+    _log_info(f"Setting up back paddles via {dev_path}")
+    fd = -1
+    try:
+        fd = os.open(dev_path, os.O_RDWR | os.O_NONBLOCK)
 
-# === Monitor ===
+        # Apply firmware remap (idempotent — persists in firmware flash)
+        if not _apply_firmware_remap(fd):
+            return {"success": False, "error": "Firmware remap failed"}
+
+        # Activate report mode so HHD sees B2 events for M1/M2
+        if not _activate_report_mode(fd):
+            return {"success": False, "error": "Report mode activation failed"}
+
+        _log_info("Back paddle setup complete — HHD will handle events")
+        return {"success": True}
+    except OSError as e:
+        _log_error(f"Back paddle setup error: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
 
 class BackPaddleMonitor:
-    """Async monitor that reads firmware report-mode events and emits uinput."""
+    """Compatibility wrapper — runs one-shot setup, no event loop needed.
+
+    HHD handles paddle events natively via extra_l1/extra_r1 on its
+    virtual gamepad. This class just applies firmware remap + report mode.
+    """
 
     def __init__(self):
         self._task = None
-        self._running = False
+        self._setup_done = False
 
     @property
     def is_running(self):
-        return self._task is not None and not self._task.done()
+        return self._setup_done
 
     def get_status(self):
-        """Return current status for the frontend."""
         return {
-            "running": self.is_running,
+            "running": self._setup_done,
             "mode": "firmware_remap",
         }
 
-    async def _monitor_loop(self):
-        """Main loop: remap → report mode → read events → uinput."""
-        import select as _select
-        self._running = True
-
-        while self._running:
-            dev_path = find_vendor_hidraw()
-            if not dev_path:
-                _log_warning("Vendor hidraw not found, retrying in 5s...")
-                await asyncio.sleep(5)
-                continue
-
-            _log_info(f"Back paddle monitor opening {dev_path}")
-            uinput_dev = None
-            fd = -1
-            try:
-                fd = os.open(dev_path, os.O_RDWR | os.O_NONBLOCK)
-
-                # Apply firmware remap (idempotent — persists in firmware)
-                _apply_firmware_remap(fd)
-
-                # Activate report mode
-                if not _activate_report_mode(fd):
-                    _log_error("Failed to activate report mode, retrying in 5s...")
-                    os.close(fd)
-                    fd = -1
-                    await asyncio.sleep(5)
-                    continue
-
-                # Create uinput device
-                uinput_dev = RawUinputDevice()
-                uinput_dev.create()
-                _log_info("Created uinput device: OXP Apex Back Paddles")
-
-                # Read report-mode events
-                while self._running:
-                    try:
-                        data = os.read(fd, 64)
-                    except BlockingIOError:
-                        await asyncio.sleep(0.005)
-                        continue
-                    except OSError:
-                        _log_warning("Device read error, will reconnect...")
-                        break
-
-                    if not data or len(data) < 13:
-                        await asyncio.sleep(0.005)
-                        continue
-
-                    # Filter: only B2 report-mode button events
-                    if data[0] != 0xB2:
-                        continue
-                    if data[3] != 0x01:  # packet type = button event
-                        continue
-                    if data[5] != 0x80:  # report mode flag
-                        continue
-
-                    button_code = data[6]
-                    state = data[12]
-
-                    if button_code == BTN_M1:
-                        evdev_btn = BTN_TRIGGER_HAPPY1
-                        label = "M1(R)"
-                    elif button_code == BTN_M2:
-                        evdev_btn = BTN_TRIGGER_HAPPY2
-                        label = "M2(L)"
-                    else:
-                        continue
-
-                    if state == STATE_PRESSED:
-                        uinput_dev.emit(EV_KEY, evdev_btn, 1)
-                        uinput_dev.syn()
-                    elif state == STATE_RELEASED:
-                        uinput_dev.emit(EV_KEY, evdev_btn, 0)
-                        uinput_dev.syn()
-
-            except OSError as e:
-                _log_error(f"Back paddle monitor error: {e}")
-            finally:
-                if fd >= 0:
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        pass
-                if uinput_dev:
-                    try:
-                        uinput_dev.close()
-                    except Exception:
-                        pass
-
-            if self._running:
-                await asyncio.sleep(5)
+    async def _do_setup(self):
+        """Run setup with retries until vendor device is found."""
+        for attempt in range(6):
+            result = await asyncio.to_thread(setup_paddles)
+            if result.get("success"):
+                self._setup_done = True
+                return
+            _log_warning(f"Paddle setup attempt {attempt + 1} failed: {result.get('error')}, retrying in 5s...")
+            await asyncio.sleep(5)
+        _log_error("Back paddle setup failed after retries")
 
     def start(self, loop):
-        """Start the monitor as an async task."""
-        if not self.is_running:
-            self._running = True
-            self._task = loop.create_task(self._monitor_loop())
-            _log_info("Back paddle monitor starting (firmware remap mode)")
+        if not self._setup_done:
+            self._task = loop.create_task(self._do_setup())
+            _log_info("Back paddle setup starting (firmware remap + report mode)")
 
     async def stop(self):
-        """Stop the monitor."""
-        self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
             try:
@@ -448,4 +314,4 @@ class BackPaddleMonitor:
             except asyncio.CancelledError:
                 pass
             self._task = None
-        _log_info("Back paddle monitor stopped")
+        _log_info("Back paddle setup stopped")

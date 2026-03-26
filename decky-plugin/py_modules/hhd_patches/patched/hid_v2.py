@@ -78,21 +78,15 @@ KBD_HOLD = 0.2
 OXP_BUTTONS = {
     0x24: KBD_NAME,
     0x21: HOME_NAME,
-    0x22: "extra_l1",
-    0x23: "extra_r1",
+    0x22: "extra_r1",  # M1 = right back paddle → R4
+    0x23: "extra_l1",  # M2 = left back paddle → L4
 }
 
 
 INITIALIZE = [
-    # gen_cmd(
-    #     0xF5,
-    #     "010238020101010101000000020102000000030103000000040104000000050105000000060106000000070107000000080108000000090109000000",
-    # ),
-    # gen_cmd(
-    #     0xF5,
-    #     "0102380202010a010a0000000b010b0000000c010c0000000d010d0000000e010e0000000f010f000000100110000000220200000000230200000000",
-    # ),
-    # gen_intercept(False),
+    # Report mode activation (B2 cycle) is handled by back_paddle.py
+    # using v1 framing which is confirmed working on the Apex.
+    # HHD just reads the resulting B2 events via produce().
 ]
 
 INIT_DELAY = 4
