@@ -136,6 +136,14 @@ except Exception as e:
     resume_fix_status = None
 
 try:
+    import xhci_recovery as _xhci_recovery_mod
+    from xhci_recovery import check_and_recover as xhci_check_and_recover
+except Exception as e:
+    decky.logger.error(f"Failed to import xhci_recovery: {e}")
+    _xhci_recovery_mod = None
+    xhci_check_and_recover = None
+
+try:
     import sleep_enable as _sleep_enable_mod
     from sleep_enable import (
         apply as apply_sleep_enable_impl,
@@ -234,6 +242,8 @@ if _sleep_fix_mod:
     _sleep_fix_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 if _sleep_enable_mod:
     _sleep_enable_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
+if _xhci_recovery_mod:
+    _xhci_recovery_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 
 
 def _clean_env():
@@ -298,6 +308,20 @@ class Plugin:
         else:
             _log_warning("back_paddle module not available")
 
+        # Recover xHCI controller if internal gamepad USB devices are missing
+        # (xHCI 0000:65:00.4 sometimes dies during boot on the Apex)
+        hhd_restart_needed = False
+        if xhci_check_and_recover:
+            try:
+                result = await asyncio.to_thread(xhci_check_and_recover)
+                if result.get("needed") and result.get("success"):
+                    _log_info("xHCI recovered — will restart HHD")
+                    hhd_restart_needed = True
+                elif result.get("needed") and not result.get("success"):
+                    _log_error("xHCI recovery failed — gamepad may not work")
+            except Exception as e:
+                _log_error(f"xHCI recovery check failed: {e}")
+
         # Auto-load oxpec driver if not already loaded (survives reboots
         # even when hotfix overlay is lost since plugin runs on every boot)
         if ensure_oxpec_loaded:
@@ -305,12 +329,16 @@ class Plugin:
                 result = ensure_oxpec_loaded()
                 if result.get("success") and result.get("loaded"):
                     method = result.get("method", "unknown")
-                    _log_info(f"oxpec auto-loaded via {method} — restarting HHD for fan control")
-                    _restart_hhd()
+                    _log_info(f"oxpec auto-loaded via {method}")
+                    hhd_restart_needed = True
                 elif result.get("already_loaded"):
                     _log_info("oxpec already loaded")
             except Exception as e:
                 _log_error(f"oxpec auto-load failed: {e}")
+
+        if hhd_restart_needed:
+            _log_info("Restarting HHD to pick up recovered hardware")
+            _restart_hhd()
 
         # Auto-start monitors if button fix is already applied
         if button_fix_status:
@@ -715,6 +743,26 @@ class Plugin:
             return result
         except Exception as e:
             _log_error(f"Resume fix revert exception: {e}")
+            return {"success": False, "error": str(e)}
+
+    # -- xHCI Recovery (manual trigger) --
+
+    async def recover_gamepad(self):
+        """Manually trigger xHCI rebind + HHD restart to recover the gamepad."""
+        if not xhci_check_and_recover:
+            return {"success": False, "error": "xhci_recovery module not loaded"}
+        _log_info("Manual gamepad recovery triggered")
+        try:
+            result = await asyncio.to_thread(xhci_check_and_recover)
+            if result.get("already_ok"):
+                return {"success": True, "message": "Gamepad already connected"}
+            if result.get("success"):
+                _log_info("xHCI recovered — restarting HHD")
+                _restart_hhd()
+                return {"success": True, "message": "Gamepad recovered and HHD restarted"}
+            return {"success": False, "error": "Recovery failed — gamepad not detected after rebind"}
+        except Exception as e:
+            _log_error(f"Gamepad recovery exception: {e}")
             return {"success": False, "error": str(e)}
 
     # -- Sleep Enable --

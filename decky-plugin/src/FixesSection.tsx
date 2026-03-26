@@ -13,6 +13,7 @@ import {
   applyResumeFix, revertResumeFix,
   applySleepEnable, revertSleepEnable,
   applyLightSleep, revertLightSleep,
+  recoverGamepad,
 } from "./rpc";
 import { InlineStatus } from "./InlineStatus";
 
@@ -120,6 +121,23 @@ export const FixesSection: FC<{
       }
     } catch (e) {
       showResult("resume", `Error: ${e}`, "error");
+    } finally {
+      setLoading({ active: null, message: "" });
+      refresh();
+    }
+  };
+
+  const handleRecoverGamepad = async () => {
+    setLoading({ active: "recoverGamepad", message: "Recovering gamepad (rebinding USB)..." });
+    try {
+      const res = await recoverGamepad();
+      if (res.success) {
+        showResult("recoverGamepad", res.message || "Recovered", "success");
+      } else {
+        showResult("recoverGamepad", res.error || "Failed", "error");
+      }
+    } catch (e) {
+      showResult("recoverGamepad", `Error: ${e}`, "error");
     } finally {
       setLoading({ active: null, message: "" });
       refresh();
@@ -249,6 +267,19 @@ export const FixesSection: FC<{
             />
           </PanelSectionRow>
           <InlineStatus loading={loading} result={result} section="resume" />
+
+          {/* Manual Gamepad Recovery */}
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              description="Rebind USB controller and restart HHD if gamepad is missing"
+              disabled={loading.active === "recoverGamepad"}
+              onClick={handleRecoverGamepad}
+            >
+              {loading.active === "recoverGamepad" ? "Recovering..." : "Recover Gamepad"}
+            </ButtonItem>
+          </PanelSectionRow>
+          <InlineStatus loading={loading} result={result} section="recoverGamepad" />
 
           {/* Sleep Enable (fan noise + fingerprint wake) */}
           <PanelSectionRow>

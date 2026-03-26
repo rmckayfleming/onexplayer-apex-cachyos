@@ -29,6 +29,9 @@ export const revertOxpec = callable<[], FixResult>("revert_oxpec");
 export const applyResumeFix = callable<[], FixResult>("apply_resume_fix");
 export const revertResumeFix = callable<[], FixResult>("revert_resume_fix");
 
+// xHCI recovery (manual gamepad recovery)
+export const recoverGamepad = callable<[], FixResult>("recover_gamepad");
+
 // Sleep enablement (fw-fanctrl + fingerprint)
 export const applySleepEnable = callable<[], FixResult>("apply_sleep_enable");
 export const revertSleepEnable = callable<[], FixResult>("revert_sleep_enable");

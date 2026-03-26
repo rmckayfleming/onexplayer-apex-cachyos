@@ -13,7 +13,7 @@ No intercept mode needed — the Xbox gamepad stays fully active with
 rumble/vibration support and native analog input.
 
 Protocol:
-  1. Send CID 0xB4 key mapping to remap M1→F13, M2→F14 (persists in firmware)
+  1. Send CID 0xB4 key mapping to remap M1→F14, M2→F13 (persists in firmware)
   2. Send B2 enable then B2 disable to activate "report mode" (flag 0x80)
   3. Read B2 report-mode packets for paddle press/release events
   4. Inject BTN_TRIGGER_HAPPY1/2 via uinput
@@ -110,7 +110,7 @@ B2_INTERCEPT_OFF = gen_cmd_v1(0xB2, [0x00, 0x01, 0x02])
 
 
 def _build_b4_page2_remap(preset=0x01):
-    """Build B4 page 2 packet: standard d-pad/buttons + M1→F13, M2→F14."""
+    """Build B4 page 2 packet: standard d-pad/buttons + M1→F14, M2→F13."""
     entries = [
         0x0A, FUNC_XBOX, 0x0A, 0x00, 0x00, 0x00,  # BACK
         0x0B, FUNC_XBOX, 0x0B, 0x00, 0x00, 0x00,  # L3
@@ -119,8 +119,8 @@ def _build_b4_page2_remap(preset=0x01):
         0x0E, FUNC_XBOX, 0x0E, 0x00, 0x00, 0x00,  # DOWN
         0x0F, FUNC_XBOX, 0x0F, 0x00, 0x00, 0x00,  # LEFT
         0x10, FUNC_XBOX, 0x10, 0x00, 0x00, 0x00,  # RIGHT
-        BTN_M1, FUNC_KEYBOARD, 0x01, OXP_KEY_F13, 0x00, 0x00,  # M1 → F13
-        BTN_M2, FUNC_KEYBOARD, 0x01, OXP_KEY_F14, 0x00, 0x00,  # M2 → F14
+        BTN_M1, FUNC_KEYBOARD, 0x01, OXP_KEY_F14, 0x00, 0x00,  # M1 (right) → F14
+        BTN_M2, FUNC_KEYBOARD, 0x01, OXP_KEY_F13, 0x00, 0x00,  # M2 (left) → F13
     ]
     cmd = [0x02, 0x38, 0x20, 0x02, preset] + entries
     return gen_cmd_v1(0xB4, cmd)
@@ -245,12 +245,12 @@ class RawUinputDevice:
 # === Firmware remap helpers ===
 
 def _apply_firmware_remap(fd):
-    """Send B4 key mapping to remap M1→F13, M2→F14.
+    """Send B4 key mapping to remap M1→F14, M2→F13.
 
     Writes both pages (all buttons). The firmware accepts writes silently
     (no B4 response), but the remap persists across reboots.
     """
-    _log_info("Applying firmware remap: M1→F13, M2→F14")
+    _log_info("Applying firmware remap: M1→F14, M2→F13")
     try:
         os.write(fd, _build_b4_page1())
         time.sleep(0.1)
