@@ -102,20 +102,10 @@ def _file_hash(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def _const_patched_hashes():
-    """SHA256 hashes of patched const.py with both apex_intercept modes.
-
-    The deployed const.py may have apex_intercept set to True or False
-    depending on the user's toggle choice. Both are valid "applied" states.
-    """
+def _const_patched_hash():
+    """SHA256 hash of patched const.py."""
     path = os.path.join(PATCHED_DIR, "const.py")
-    with open(path, "rb") as f:
-        content = f.read()
-    h_true = hashlib.sha256(content).hexdigest()
-    h_false = hashlib.sha256(
-        content.replace(b'"apex_intercept": True', b'"apex_intercept": False')
-    ).hexdigest()
-    return {h_true, h_false}
+    return _file_hash(path)
 
 
 def is_applied():
@@ -133,8 +123,7 @@ def is_applied():
             if not os.path.exists(patched):
                 return {"applied": False, "error": f"Bundled patched {name} missing"}
             if name == "const.py":
-                # const.py may have apex_intercept toggled — accept both states
-                if _file_hash(target) not in _const_patched_hashes():
+                if _file_hash(target) != _const_patched_hash():
                     return {"applied": False}
             else:
                 if _file_hash(target) != _file_hash(patched):
@@ -186,9 +175,8 @@ def check_compatibility():
 
         h = _file_hash(target)
         if name == "const.py":
-            # const.py may have apex_intercept toggled — accept both states
-            if h in _const_patched_hashes():
-                continue  # already patched (either intercept mode)
+            if h == _const_patched_hash():
+                continue  # already patched
         else:
             if h == _file_hash(patched):
                 continue  # already patched

@@ -1,5 +1,4 @@
 import logging
-import struct
 import time
 from collections import deque
 from typing import Literal
@@ -10,21 +9,8 @@ from hhd.controller.physical.hidraw import GenericGamepadHidraw
 logger = logging.getLogger(__name__)
 
 # Patch version marker — if you see this in logs, the correct file is loaded
-_PATCH_VERSION = "apex-stick-v8-no-filter"
+_PATCH_VERSION = "apex-firmware-remap"
 logger.info(f"OXP hid_v2 loaded: {_PATCH_VERSION}")
-
-
-def _decode_axis(raw: int, negate: bool = False) -> float:
-    """Decode a signed 16-bit stick axis value to [-1.0, 1.0].
-
-    Handles normalization, optional Y-axis inversion, and clamping.
-    Overflow correction (negation at s16 boundaries) is applied in
-    _produce_apex before this value is emitted.
-    """
-    val = raw / 32768.0
-    if negate:
-        val = -val
-    return max(-1.0, min(1.0, val))
 
 
 def gen_cmd(cid: int, cmd: bytes | list[int] | str, size: int = 64):
@@ -35,17 +21,6 @@ def gen_cmd(cid: int, cmd: bytes | list[int] | str, size: int = 64):
         c = bytes(cmd)
     base = bytes([cid, 0xFF, *c])
     return base + bytes([0] * (size - len(base)))
-
-
-def gen_cmd_v1(cid: int, cmd: list[int], idx: int = 0x01, size: int = 64):
-    """Generate an HID v1 command packet (0x3F framing).
-
-    Used by Apex and X1 Mini devices. Format:
-    [cid, 0x3F, idx, ...cmd..., padding, 0x3F, cid]
-    """
-    base = bytes([cid, 0x3F, idx] + cmd)
-    padding = bytes([0] * (size - len(base) - 2))
-    return base + padding + bytes([0x3F, cid])
 
 
 def gen_rgb_mode(mode: str):
@@ -96,27 +71,6 @@ def gen_rgb_solid(r, g, b):
     return gen_cmd(0x07, [0xFE] + 20 * [r, g, b] + [0x00])
 
 
-def gen_vibration(strength: int):
-    """Generate a vibration command via vendor HID. strength: 0-255.
-
-    NOTE: Sending 0xB3 while intercept mode (0xB2) is active causes the
-    firmware to exit intercept mode entirely (red light / mouse mode).
-    This is a hardware limitation — all tested approaches fail:
-      - 0xB3 v1 framing (0x3F): vibrates but exits intercept
-      - 0xB3 v2 framing (0xFF): no vibration, still exits intercept
-      - Xbox gamepad FF_RUMBLE via evdev: firmware ignores in intercept
-      - Direct USB output report to Xbox endpoint: no vibration at all
-    Rumble is therefore unavailable in intercept mode.
-    """
-    mode = 0x02 if strength == 0 else 0x01
-    cmd = (
-        [0x02, 0x38, 0x02, 0xE3, 0x39, 0xE3, 0x39, 0xE3, 0x39, mode, strength, strength, 0xE3, 0x39, 0xE3]
-        + [0x00] * 35
-        + [0x39, 0xE3, 0x39, 0xE3, 0xE3, 0x02, 0x04, 0x39, 0x39]
-    )
-    return gen_cmd_v1(0xB3, cmd)
-
-
 KBD_NAME = "keyboard"
 HOME_NAME = "guide"
 KBD_NAME_NON_TURBO = "share"
@@ -127,30 +81,6 @@ OXP_BUTTONS = {
     0x22: "extra_l1",
     0x23: "extra_r1",
 }
-
-# Full button map for Apex v1 intercept mode.
-# When intercept is active, ALL input comes through vendor HID.
-# D-pad is handled separately as hat axes (see _produce_apex).
-APEX_V1_BUTTONS = {
-    0x01: "a",
-    0x02: "b",
-    0x03: "x",
-    0x04: "y",
-    0x05: "lb",
-    0x06: "rb",
-    # 0x07/0x08: LT/RT digital click — ignored, use analog from state packets
-    0x09: "start",
-    0x0A: "select",
-    0x0B: "ls",
-    0x0C: "rs",
-    0x21: HOME_NAME,
-    0x22: "extra_r1",  # HID 0x22 = physical RIGHT paddle
-    0x23: "extra_l1",  # HID 0x23 = physical LEFT paddle
-    0x24: KBD_NAME,
-}
-
-# D-pad codes — emitted as hat_x/hat_y axis events for the Multiplexer
-APEX_V1_DPAD = {0x0D: "up", 0x0E: "down", 0x0F: "left", 0x10: "right"}
 
 
 INITIALIZE = [
@@ -171,7 +101,7 @@ SCAN_DELAY = 1
 
 
 class OxpHidrawV2(GenericGamepadHidraw):
-    def __init__(self, *args, turbo: bool = True, apex_v1: bool = False, **kwargs) -> None:
+    def __init__(self, *args, turbo: bool = True, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.prev = {}
         self.queue_kbd = None
@@ -180,9 +110,6 @@ class OxpHidrawV2(GenericGamepadHidraw):
         self.next_send = 0
         self.queue_led = None
         self.turbo = turbo
-        self.apex_v1 = apex_v1
-        self.prev_axes = {}
-        self.dpad = {"up": False, "down": False, "left": False, "right": False}
 
         self.prev_brightness = None
         self.prev_stick = None
@@ -195,43 +122,13 @@ class OxpHidrawV2(GenericGamepadHidraw):
         self.queue_kbd = None
         self.queue_home = None
         self.prev = {}
-        self.prev_axes = {}
-        self.dpad = {"up": False, "down": False, "left": False, "right": False}
         self.next_send = time.perf_counter() + INIT_DELAY
 
-        if self.apex_v1:
-            # Send intercept enable — takes over Xbox gamepad, routes all
-            # input through vendor HID (buttons as type 0x01, analog as 0x02)
-            self.queue_cmd.extend([gen_cmd_v1(0xB2, [0x03, 0x01, 0x02])])
-        else:
-            self.queue_cmd.extend(INITIALIZE)
+        self.queue_cmd.extend(INITIALIZE)
         return a
-
-    def close(self, exit: bool) -> bool:
-        if self.apex_v1 and self.dev:
-            try:
-                # Disable intercept — Xbox gamepad resumes normal operation
-                self.dev.write(gen_cmd_v1(0xB2, [0x00, 0x01, 0x02]))
-                time.sleep(0.05)
-            except Exception:
-                pass
-        return super().close(exit)
 
     def consume(self, events):
         if not self.dev:
-            return
-
-        # Apex v1 intercept mode — rumble is unavailable.
-        # Sending 0xB3 via vendor HID exits intercept mode (firmware
-        # limitation). Xbox gamepad FF and direct USB writes also fail.
-        # Only process queued commands (e.g. intercept-enable on open).
-        if self.apex_v1:
-            curr = time.perf_counter()
-            if self.queue_cmd and curr - self.next_send > 0:
-                cmd = self.queue_cmd.popleft()
-                logger.info(f"OXP C: {cmd.hex()}")
-                self.dev.write(cmd)
-                self.next_send = curr + WRITE_DELAY
             return
 
         # Capture led events
@@ -298,133 +195,9 @@ class OxpHidrawV2(GenericGamepadHidraw):
             self.prev_brightness = brightness
             self.prev_stick_enabled = stick_enabled
 
-    def _produce_apex(self, fds):
-        """Produce events in Apex v1 intercept mode.
-
-        Full intercept takes over the Xbox gamepad — all input comes through
-        vendor HID as two packet types:
-          - type 0x01: discrete button press/release events
-          - type 0x02: continuous gamepad state (sticks + triggers analog)
-        """
-        evs = []
-
-        if self.fd not in fds:
-            return evs
-
-        while can_read(self.fd):
-            cmd = self.dev.read()
-
-            if len(cmd) < 4 or cmd[0] != 0xB2:
-                continue
-
-            pkt_type = cmd[3]
-
-            if pkt_type == 0x01 and len(cmd) >= 13:
-                # Button event
-                btn_code = cmd[6]
-                pressed = cmd[12] == 0x01
-
-                if btn_code in APEX_V1_DPAD:
-                    # D-pad: track state and emit hat_x/hat_y axes
-                    direction = APEX_V1_DPAD[btn_code]
-                    if self.dpad[direction] != pressed:
-                        self.dpad[direction] = pressed
-                        hat_x = float(self.dpad["right"]) - float(self.dpad["left"])
-                        hat_y = float(self.dpad["down"]) - float(self.dpad["up"])
-                        prev_hx = self.prev_axes.get("hat_x")
-                        prev_hy = self.prev_axes.get("hat_y")
-                        if prev_hx is None or hat_x != prev_hx:
-                            evs.append({"type": "axis", "code": "hat_x", "value": hat_x})
-                            self.prev_axes["hat_x"] = hat_x
-                        if prev_hy is None or hat_y != prev_hy:
-                            evs.append({"type": "axis", "code": "hat_y", "value": hat_y})
-                            self.prev_axes["hat_y"] = hat_y
-
-                elif btn_code in APEX_V1_BUTTONS:
-                    btn_name = APEX_V1_BUTTONS[btn_code]
-
-                    # Debounce — skip if same state as previous
-                    if btn_name in self.prev and self.prev[btn_name] == pressed:
-                        continue
-                    self.prev[btn_name] = pressed
-
-                    evs.append(
-                        {
-                            "type": "button",
-                            "code": btn_name,
-                            "value": pressed,
-                        }
-                    )
-
-            elif pkt_type == 0x02 and len(cmd) >= 25:
-                # Gamepad state — analog sticks and triggers
-                # byte[15]: RT (0-255), byte[16]: LT (0-255)
-                # bytes[17:19]: LX (s16 LE), bytes[19:21]: LY (s16 LE, inverted)
-                # bytes[21:23]: RX (s16 LE, wraps at full deflection)
-                # bytes[23:25]: RY (s16 LE, inverted, wraps at full deflection)
-                lt = cmd[16] / 255.0
-                rt = cmd[15] / 255.0
-                lx = max(-1.0, min(1.0, struct.unpack_from("<h", cmd, 17)[0] / 32768.0))
-                ly = max(-1.0, min(1.0, -(struct.unpack_from("<h", cmd, 19)[0] / 32768.0)))
-
-                # RX: the stick's physical range (~±31700) exceeds signed
-                # 16-bit at full deflection. At full left the raw value
-                # wraps from ~-31617 to exactly +32767; at full right it
-                # wraps to exactly -32768. Only these exact boundary values
-                # indicate overflow — all other values are real positions.
-                rx_raw = struct.unpack_from("<h", cmd, 21)[0]
-                if rx_raw == 32767:
-                    rx = -1.0   # overflowed from left extreme
-                elif rx_raw == -32768:
-                    rx = 1.0    # overflowed from right extreme
-                else:
-                    rx = max(-1.0, min(1.0, rx_raw / 32768.0))
-
-                # RY: same overflow as RX. At full up (raw negative) it
-                # wraps to +32767; at full down (raw positive) it wraps
-                # to -32768. The Y axis is inverted (negated).
-                ry_raw = struct.unpack_from("<h", cmd, 23)[0]
-                if ry_raw == 32767:
-                    ry = 1.0    # overflowed from up (negative raw -> positive output)
-                elif ry_raw == -32768:
-                    ry = -1.0   # overflowed from down (positive raw -> negative output)
-                else:
-                    ry = max(-1.0, min(1.0, -(ry_raw / 32768.0)))
-
-                axes = {
-                    "lt": lt,
-                    "rt": rt,
-                    "ls_x": lx,
-                    "ls_y": ly,
-                    "rs_x": rx,
-                    "rs_y": ry,
-                }
-
-                # Emit every axis value unconditionally — no delta
-                # filtering. The direct uinput relay proved that
-                # unfiltered values give native-feeling sticks.
-                # Boundary overflow corrections above (rx_raw/ry_raw
-                # == ±32768/32767) are kept.
-                for code, value in axes.items():
-                    evs.append(
-                        {
-                            "type": "axis",
-                            "code": code,
-                            "value": value,
-                        }
-                    )
-
-            # type 0x03 = ACK responses, silently ignore
-
-        return evs
-
     def produce(self, fds):
         if not self.dev:
             return []
-
-        # Apex v1 intercept mode — completely different parsing path
-        if self.apex_v1:
-            return self._produce_apex(fds)
 
         evs = []
         # A bit unclean with 2 buttons but it works
