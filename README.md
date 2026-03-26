@@ -22,13 +22,21 @@ Loads the `oxpec` kernel module which provides hwmon sensor access and enables [
 Patches [HHD](https://github.com/hhd-dev/hhd) to recognize the Apex as a known device. Without this, HHD grabs input but doesn't forward button events — face buttons, Home, and QAM buttons are all dead.
 
 - Toggle on to apply the fix, toggle off to restore original HHD files
+- Also enables back paddle support (see below) — the patched HHD files include M1/M2 → extra_l1/extra_r1 mapping
 - Survives sleep/wake but must be re-applied after Bazzite updates or `rpm-ostree` operations
 
 ### Back Paddle Support
-Enables the L4/R4 back paddles as separate buttons via HHD's full intercept mode. The Apex's vendor HID device (`1a86:fe00`) reports all gamepad input through a proprietary protocol — this mode parses it and exposes the back paddles to Steam Input.
+Enables the L4/R4 back paddles by writing a firmware-level key remap to the controller and routing paddle events through HHD's virtual gamepad. No intercept mode — the standard Xbox controller stays fully active with rumble/vibration support.
 
-- Back paddles appear as extra buttons you can remap in Steam Input settings (per-game or global)
-- Toggle off if you experience stick drift or input issues (full intercept replaces the standard Xbox controller)
+**How it works:**
+1. A one-shot setup writes a B4 remap command to the controller firmware, reassigning M1 → F14 and M2 → F13 (persists across reboots)
+2. A B2 enable/disable cycle activates "report mode" so the controller emits paddle events (must be re-activated each boot)
+3. The patched HHD reads these events and maps them to `extra_r1` (R4) and `extra_l1` (L4) on its virtual gamepad
+
+- Back paddles appear as L4/R4 in Steam Input settings (per-game or global)
+- No phantom input device — paddles go through HHD's existing virtual gamepad
+- Full rumble support (not possible with the old intercept mode approach)
+- Requires the Button Fix to be applied (patched HHD files include the paddle mapping)
 
 ### Speaker DSP (EQ Enhancement)
 Applies a parametric EQ to the internal speakers using PipeWire's built-in filter-chain. The Apex's speakers sound tinny and lack bass out of the box — this makes them significantly better.
