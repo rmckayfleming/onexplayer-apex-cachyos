@@ -29,8 +29,6 @@ try:
         apply as apply_button_fix_impl,
         revert as revert_button_fix_impl,
         is_applied as button_fix_status,
-        get_intercept_mode as get_intercept_mode_impl,
-        set_intercept_mode as set_intercept_mode_impl,
     )
 except Exception as e:
     decky.logger.error(f"Failed to import button_fix: {e}")
@@ -38,8 +36,14 @@ except Exception as e:
     apply_button_fix_impl = None
     revert_button_fix_impl = None
     button_fix_status = None
-    get_intercept_mode_impl = None
-    set_intercept_mode_impl = None
+
+try:
+    import back_paddle as _back_paddle_mod
+    from back_paddle import BackPaddleMonitor
+except Exception as e:
+    decky.logger.error(f"Failed to import back_paddle: {e}")
+    _back_paddle_mod = None
+    BackPaddleMonitor = None
 
 try:
     import sleep_fix as _sleep_fix_mod
@@ -132,6 +136,14 @@ except Exception as e:
     resume_fix_status = None
 
 try:
+    import xhci_recovery as _xhci_recovery_mod
+    from xhci_recovery import check_and_recover as xhci_check_and_recover
+except Exception as e:
+    decky.logger.error(f"Failed to import xhci_recovery: {e}")
+    _xhci_recovery_mod = None
+    xhci_check_and_recover = None
+
+try:
     import sleep_enable as _sleep_enable_mod
     from sleep_enable import (
         apply as apply_sleep_enable_impl,
@@ -145,10 +157,8 @@ except Exception as e:
     revert_sleep_enable_impl = None
     sleep_enable_status = None
 
-# back_paddle.py is no longer used as a separate monitor — the button fix
-# patches HHD's hid_v2.py with full v1 intercept mode (apex_v1=True).
-# OxpHidrawV2 handles ALL gamepad input: sticks, triggers, buttons, and
-# back paddles (L4/R4) natively through HHD's virtual Steam Controller.
+
+
 
 def _get_user_home():
     """Get the real (non-root) user's home directory.
@@ -218,6 +228,8 @@ def _log_warning(msg: str):
 # Wire log callbacks into helper modules so their logs appear in oxp-apex.log
 if _button_fix_mod:
     _button_fix_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
+if _back_paddle_mod:
+    _back_paddle_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 if _home_button_mod:
     _home_button_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 if _speaker_dsp_mod:
@@ -230,6 +242,8 @@ if _sleep_fix_mod:
     _sleep_fix_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 if _sleep_enable_mod:
     _sleep_enable_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
+if _xhci_recovery_mod:
+    _xhci_recovery_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 
 
 def _clean_env():
@@ -271,6 +285,8 @@ def _restart_hhd():
 class Plugin:
     # Home button HID monitor instance
     home_monitor = None
+    # Back paddle firmware remap monitor instance
+    paddle_monitor = None
 
     async def _main(self):
         """Plugin entry point — called by Decky on load."""
@@ -282,11 +298,29 @@ class Plugin:
         _log_info(f"Plugin dir: {decky.DECKY_PLUGIN_DIR}")
         _log_info(f"Log dir: {decky.DECKY_PLUGIN_LOG_DIR}")
 
-        # Create home monitor instance (started automatically with button fix)
+        # Create monitor instances (started automatically with button fix)
         if HomeButtonMonitor:
             self.home_monitor = HomeButtonMonitor()
         else:
             _log_warning("home_button module not available")
+        if BackPaddleMonitor:
+            self.paddle_monitor = BackPaddleMonitor()
+        else:
+            _log_warning("back_paddle module not available")
+
+        # Recover xHCI controller if internal gamepad USB devices are missing
+        # (xHCI 0000:65:00.4 sometimes dies during boot on the Apex)
+        hhd_restart_needed = False
+        if xhci_check_and_recover:
+            try:
+                result = await asyncio.to_thread(xhci_check_and_recover)
+                if result.get("needed") and result.get("success"):
+                    _log_info("xHCI recovered — will restart HHD")
+                    hhd_restart_needed = True
+                elif result.get("needed") and not result.get("success"):
+                    _log_error("xHCI recovery failed — gamepad may not work")
+            except Exception as e:
+                _log_error(f"xHCI recovery check failed: {e}")
 
         # Auto-load oxpec driver if not already loaded (survives reboots
         # even when hotfix overlay is lost since plugin runs on every boot)
@@ -295,19 +329,24 @@ class Plugin:
                 result = ensure_oxpec_loaded()
                 if result.get("success") and result.get("loaded"):
                     method = result.get("method", "unknown")
-                    _log_info(f"oxpec auto-loaded via {method} — restarting HHD for fan control")
-                    _restart_hhd()
+                    _log_info(f"oxpec auto-loaded via {method}")
+                    hhd_restart_needed = True
                 elif result.get("already_loaded"):
                     _log_info("oxpec already loaded")
             except Exception as e:
                 _log_error(f"oxpec auto-load failed: {e}")
 
-        # Auto-start home monitor if button fix is already applied
+        if hhd_restart_needed:
+            _log_info("Restarting HHD to pick up recovered hardware")
+            _restart_hhd()
+
+        # Auto-start monitors if button fix is already applied
         if button_fix_status:
             status = button_fix_status()
             if status.get("applied"):
-                _log_info("Button fix already applied — auto-starting home monitor")
+                _log_info("Button fix already applied — auto-starting monitors")
                 self._start_home_monitor()
+                self._start_paddle_monitor()
 
     async def _unload(self):
         """Plugin teardown — called by Decky on unload."""
@@ -319,6 +358,8 @@ class Plugin:
             except Exception:
                 pass
         # Stop monitors if active
+        if self.paddle_monitor:
+            await self.paddle_monitor.stop()
         if self.home_monitor:
             await self.home_monitor.stop()
 
@@ -328,8 +369,7 @@ class Plugin:
         """Get combined status of all features — called by the frontend on load."""
         bf_status = button_fix_status() if button_fix_status else {"applied": False, "error": "module not loaded"}
         bf_status["home_monitor_running"] = self.home_monitor.is_running if self.home_monitor else False
-        if bf_status.get("applied") and get_intercept_mode_impl:
-            bf_status["intercept_enabled"] = get_intercept_mode_impl().get("enabled", True)
+        bf_status["paddle_monitor_running"] = self.paddle_monitor.is_running if self.paddle_monitor else False
         return {
             "button_fix": bf_status,
             "light_sleep": sleep_fix_status() if sleep_fix_status else {"applied": False, "has_problematic_kargs": False, "problematic_kargs": [], "light_sleep_present": [], "light_sleep_missing": []},
@@ -386,6 +426,7 @@ class Plugin:
             if result.get("success"):
                 _log_info(f"Button fix applied: {result.get('message', 'OK')}")
                 self._start_home_monitor()
+                self._start_paddle_monitor()
             else:
                 _log_error(f"Button fix failed: {result.get('error', 'unknown')}")
             return result
@@ -398,6 +439,7 @@ class Plugin:
             return {"success": False, "error": "button_fix module not loaded"}
         _log_info("Reverting button fix...")
         try:
+            await self._stop_paddle_monitor()
             await self._stop_home_monitor()
             result = await asyncio.to_thread(revert_button_fix_impl)
             if result.get("success"):
@@ -407,28 +449,6 @@ class Plugin:
             return result
         except Exception as e:
             _log_error(f"Button fix revert exception: {e}")
-            return {"success": False, "error": str(e)}
-
-    # -- Intercept Mode --
-
-    async def get_intercept_mode(self):
-        if not get_intercept_mode_impl:
-            return {"enabled": True, "error": "module not loaded"}
-        return get_intercept_mode_impl()
-
-    async def set_intercept_mode(self, enabled):
-        if not set_intercept_mode_impl:
-            return {"success": False, "error": "button_fix module not loaded"}
-        _log_info(f"Setting intercept mode: {'full' if enabled else 'face buttons only'}")
-        try:
-            result = await asyncio.to_thread(set_intercept_mode_impl, enabled)
-            if result.get("success"):
-                _log_info(f"Intercept mode set: {result.get('message', 'OK')}")
-            else:
-                _log_error(f"Intercept mode failed: {result.get('error', 'unknown')}")
-            return result
-        except Exception as e:
-            _log_error(f"Intercept mode exception: {e}")
             return {"success": False, "error": str(e)}
 
     # -- Light Sleep (s2idle kargs) --
@@ -630,6 +650,25 @@ class Plugin:
             await self.home_monitor.stop()
             _log_info("Home button monitor stopped")
 
+    # -- Back Paddle Monitor (private — managed by button fix lifecycle) --
+
+    def _start_paddle_monitor(self):
+        if not self.paddle_monitor:
+            if BackPaddleMonitor:
+                self.paddle_monitor = BackPaddleMonitor()
+            else:
+                _log_warning("Cannot start paddle monitor — module not loaded")
+                return
+        if not self.paddle_monitor.is_running:
+            loop = asyncio.get_event_loop()
+            self.paddle_monitor.start(loop)
+            _log_info("Back paddle monitor started (firmware remap mode)")
+
+    async def _stop_paddle_monitor(self):
+        if self.paddle_monitor and self.paddle_monitor.is_running:
+            await self.paddle_monitor.stop()
+            _log_info("Back paddle monitor stopped")
+
     # -- oxpec EC Sensor Driver --
 
     async def get_oxpec_status(self):
@@ -704,6 +743,26 @@ class Plugin:
             return result
         except Exception as e:
             _log_error(f"Resume fix revert exception: {e}")
+            return {"success": False, "error": str(e)}
+
+    # -- xHCI Recovery (manual trigger) --
+
+    async def recover_gamepad(self):
+        """Manually trigger xHCI rebind + HHD restart to recover the gamepad."""
+        if not xhci_check_and_recover:
+            return {"success": False, "error": "xhci_recovery module not loaded"}
+        _log_info("Manual gamepad recovery triggered")
+        try:
+            result = await asyncio.to_thread(xhci_check_and_recover)
+            if result.get("already_ok"):
+                return {"success": True, "message": "Gamepad already connected"}
+            if result.get("success"):
+                _log_info("xHCI recovered — restarting HHD")
+                _restart_hhd()
+                return {"success": True, "message": "Gamepad recovered and HHD restarted"}
+            return {"success": False, "error": "Recovery failed — gamepad not detected after rebind"}
+        except Exception as e:
+            _log_error(f"Gamepad recovery exception: {e}")
             return {"success": False, "error": str(e)}
 
     # -- Sleep Enable --

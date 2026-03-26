@@ -9,7 +9,7 @@ import { FixesSection } from "./FixesSection";
 import { LogsSection } from "./LogsSection";
 
 const Content: FC = () => {
-  const [buttonFix, setButtonFix] = useState<{ applied: boolean; error?: string; home_monitor_running?: boolean; intercept_enabled?: boolean }>({
+  const [buttonFix, setButtonFix] = useState<{ applied: boolean; error?: string; home_monitor_running?: boolean; paddle_monitor_running?: boolean }>({
     applied: false,
   });
   const [lightSleep, setLightSleep] = useState<LightSleepStatus>({

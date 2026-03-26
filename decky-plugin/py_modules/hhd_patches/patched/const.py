@@ -111,7 +111,7 @@ CONFS = {
         **ONEX_DEFAULT_CONF,
         "protocol": "hid_v2",
         "apex": True,
-        "apex_intercept": True,
+        "apex_intercept": False,
     },
     # OXP 2
     "ONEXPLAYER 2": OXP_2_CONF,

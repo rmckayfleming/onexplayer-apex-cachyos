@@ -261,7 +261,7 @@ class OxpAtKbd(GenericGamepadEvdev):
         return evs
 
 
-def find_vendor(prepare, turbo, protocol: str | None, secondary: bool, vibration: str | None, apex: bool = False, apex_intercept: bool = True):
+def find_vendor(prepare, turbo, protocol: str | None, secondary: bool, vibration: str | None, apex: bool = False, apex_intercept: bool = False):
     vibration_val = None
     if vibration is not None:
         if not isinstance(vibration, str) or not vibration.startswith("v"):
@@ -283,9 +283,7 @@ def find_vendor(prepare, turbo, protocol: str | None, secondary: bool, vibration
     )
     if apex:
         # Apex: vendor HID is 1A86:FE00 (X1_MINI), not 1A2C:B001 (XFLY)
-        # apex_v1=True enables full intercept mode — all gamepad input
-        # comes through vendor HID (sticks, triggers, buttons, back paddles)
-        # apex_v1=False enables face-buttons-only mode — just Home + QAM
+        # Back paddles handled by firmware remap (back_paddle.py), not intercept
         d_hidraw_v2 = OxpHidrawV2(
             vid=[X1_MINI_VID],
             pid=[X1_MINI_PID],
@@ -293,7 +291,6 @@ def find_vendor(prepare, turbo, protocol: str | None, secondary: bool, vibration
             usage=[X1_MINI_USAGE],
             turbo=turbo,
             required=True,
-            apex_v1=apex_intercept,
         )
     else:
         d_hidraw_v2 = OxpHidrawV2(
@@ -776,11 +773,6 @@ def controller_loop(
 
     if motion:
         REPORT_FREQ_MAX = max(REPORT_FREQ_MAX, conf["imu_hz"].to(float))
-
-    # Apex intercept mode: all input comes through vendor HID at high rate.
-    # Match the native polling speed to avoid stick latency.
-    if dconf.get("apex_intercept", False):
-        REPORT_FREQ_MAX = max(REPORT_FREQ_MAX, 500)
 
     REPORT_DELAY_MAX = 1 / REPORT_FREQ_MIN
     REPORT_DELAY_MIN = 1 / REPORT_FREQ_MAX

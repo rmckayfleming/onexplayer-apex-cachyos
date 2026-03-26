@@ -7,7 +7,6 @@ export const revertButtonFix = callable<[], FixResult>("revert_button_fix");
 export const applyLightSleep = callable<[], FixResult>("apply_light_sleep");
 export const revertLightSleep = callable<[], FixResult>("revert_light_sleep");
 export const saveLogs = callable<[], { success: boolean; path?: string; error?: string }>("save_logs");
-export const setInterceptMode = callable<[boolean], FixResult>("set_intercept_mode");
 export const enableSpeakerDSP = callable<[string], FixResult>("enable_speaker_dsp");
 export const disableSpeakerDSP = callable<[], FixResult>("disable_speaker_dsp");
 export const setDSPProfile = callable<[string], FixResult>("set_dsp_profile");
@@ -29,6 +28,9 @@ export const revertOxpec = callable<[], FixResult>("revert_oxpec");
 // Resume recovery (gamepad after sleep)
 export const applyResumeFix = callable<[], FixResult>("apply_resume_fix");
 export const revertResumeFix = callable<[], FixResult>("revert_resume_fix");
+
+// xHCI recovery (manual gamepad recovery)
+export const recoverGamepad = callable<[], FixResult>("recover_gamepad");
 
 // Sleep enablement (fw-fanctrl + fingerprint)
 export const applySleepEnable = callable<[], FixResult>("apply_sleep_enable");

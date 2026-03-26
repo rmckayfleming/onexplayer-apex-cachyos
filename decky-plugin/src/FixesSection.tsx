@@ -8,17 +8,18 @@ import {
 } from "@decky/ui";
 import type { LoadingState, ResultMessage, OxpecStatus, ResumeFixStatus, SleepEnableStatus, LightSleepStatus } from "./types";
 import {
-  applyButtonFix, revertButtonFix, setInterceptMode,
+  applyButtonFix, revertButtonFix,
   applyOxpec, revertOxpec,
   applyResumeFix, revertResumeFix,
   applySleepEnable, revertSleepEnable,
   applyLightSleep, revertLightSleep,
+  recoverGamepad,
 } from "./rpc";
 import { InlineStatus } from "./InlineStatus";
 
 export const FixesSection: FC<{
-  buttonFix: { applied: boolean; error?: string; home_monitor_running?: boolean; intercept_enabled?: boolean };
-  setButtonFix: React.Dispatch<React.SetStateAction<{ applied: boolean; error?: string; home_monitor_running?: boolean; intercept_enabled?: boolean }>>;
+  buttonFix: { applied: boolean; error?: string; home_monitor_running?: boolean; paddle_monitor_running?: boolean };
+  setButtonFix: React.Dispatch<React.SetStateAction<{ applied: boolean; error?: string; home_monitor_running?: boolean; paddle_monitor_running?: boolean }>>;
   lightSleep: LightSleepStatus;
   setLightSleep: React.Dispatch<React.SetStateAction<LightSleepStatus>>;
   oxpec: OxpecStatus;
@@ -51,24 +52,6 @@ export const FixesSection: FC<{
       }
     } catch (e) {
       showResult("button", `Error: ${e}`, "error");
-    } finally {
-      setLoading({ active: null, message: "" });
-      refresh();
-    }
-  };
-
-  const handleInterceptMode = async (fullIntercept: boolean) => {
-    setLoading({ active: "intercept", message: "Switching controller mode..." });
-    try {
-      const res = await setInterceptMode(fullIntercept);
-      if (res.success) {
-        setButtonFix((prev) => ({ ...prev, intercept_enabled: fullIntercept }));
-        showResult("intercept", res.message || (fullIntercept ? "Full intercept" : "Face buttons only"), "success");
-      } else {
-        showResult("intercept", res.error || "Failed", "error");
-      }
-    } catch (e) {
-      showResult("intercept", `Error: ${e}`, "error");
     } finally {
       setLoading({ active: null, message: "" });
       refresh();
@@ -138,6 +121,23 @@ export const FixesSection: FC<{
       }
     } catch (e) {
       showResult("resume", `Error: ${e}`, "error");
+    } finally {
+      setLoading({ active: null, message: "" });
+      refresh();
+    }
+  };
+
+  const handleRecoverGamepad = async () => {
+    setLoading({ active: "recoverGamepad", message: "Recovering gamepad (rebinding USB)..." });
+    try {
+      const res = await recoverGamepad();
+      if (res.success) {
+        showResult("recoverGamepad", res.message || "Recovered", "success");
+      } else {
+        showResult("recoverGamepad", res.error || "Failed", "error");
+      }
+    } catch (e) {
+      showResult("recoverGamepad", `Error: ${e}`, "error");
     } finally {
       setLoading({ active: null, message: "" });
       refresh();
@@ -233,39 +233,23 @@ export const FixesSection: FC<{
           </PanelSectionRow>
           <InlineStatus loading={loading} result={result} section="button" />
           {buttonFix.applied && (
-            <>
-              <PanelSectionRow>
-                <ToggleField
-                  label="Back Paddle Support"
-                  description={
-                    buttonFix.intercept_enabled !== false
-                      ? "ON — L4/R4 back paddles enabled"
-                      : "OFF — Standard gamepad mode"
-                  }
-                  checked={buttonFix.intercept_enabled !== false}
-                  disabled={loading.active === "intercept"}
-                  onChange={handleInterceptMode}
-                />
-              </PanelSectionRow>
-              <InlineStatus loading={loading} result={result} section="intercept" />
-              <PanelSectionRow>
-                <div
-                  style={{
-                    backgroundColor: "#1a2a3a",
-                    border: "1px solid #2a4a6a",
-                    borderRadius: "4px",
-                    padding: "8px 12px",
-                    fontSize: "11px",
-                    lineHeight: "1.4",
-                    color: "#88bbdd",
-                  }}
-                >
-                  {buttonFix.intercept_enabled !== false
-                    ? "Back paddles (L4/R4) work as extra buttons. You can remap them in Steam Input settings (per-game or global). If you experience stick drift or input issues, switch this off."
-                    : "Standard mode — Home and QAM buttons work, all other input handled by the default gamepad driver. Turn this on to enable L4/R4 back paddles."}
-                </div>
-              </PanelSectionRow>
-            </>
+            <PanelSectionRow>
+              <div
+                style={{
+                  backgroundColor: "#1a2a3a",
+                  border: "1px solid #2a4a6a",
+                  borderRadius: "4px",
+                  padding: "8px 12px",
+                  fontSize: "11px",
+                  lineHeight: "1.4",
+                  color: "#88bbdd",
+                }}
+              >
+                {buttonFix.paddle_monitor_running
+                  ? "Back paddles (L4/R4) active via firmware remap. Full rumble supported. Remap in Steam Input settings (per-game or global)."
+                  : "Back paddle monitor starting..."}
+              </div>
+            </PanelSectionRow>
           )}
 
           {/* Resume Recovery */}
@@ -283,6 +267,19 @@ export const FixesSection: FC<{
             />
           </PanelSectionRow>
           <InlineStatus loading={loading} result={result} section="resume" />
+
+          {/* Manual Gamepad Recovery */}
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              description="Rebind USB controller and restart HHD if gamepad is missing"
+              disabled={loading.active === "recoverGamepad"}
+              onClick={handleRecoverGamepad}
+            >
+              {loading.active === "recoverGamepad" ? "Recovering..." : "Recover Gamepad"}
+            </ButtonItem>
+          </PanelSectionRow>
+          <InlineStatus loading={loading} result={result} section="recoverGamepad" />
 
           {/* Sleep Enable (fan noise + fingerprint wake) */}
           <PanelSectionRow>
